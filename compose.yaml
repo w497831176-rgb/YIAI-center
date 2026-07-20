@@ -1,0 +1,28 @@
+name: yiai-center
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_DEFAULT_MODEL: ${DEEPSEEK_DEFAULT_MODEL:-deepseek-v4-flash}
+      DEEPSEEK_THINKING_EFFORT: ${DEEPSEEK_THINKING_EFFORT:-high}
+      DEEPSEEK_FLASH_CACHE_HIT_USD_PER_M: ${DEEPSEEK_FLASH_CACHE_HIT_USD_PER_M:-0.0028}
+      DEEPSEEK_FLASH_CACHE_MISS_USD_PER_M: ${DEEPSEEK_FLASH_CACHE_MISS_USD_PER_M:-0.14}
+      DEEPSEEK_FLASH_OUTPUT_USD_PER_M: ${DEEPSEEK_FLASH_OUTPUT_USD_PER_M:-0.28}
+      HTTPS_PROXY: ${YIAI_HTTPS_PROXY:-}
+      NO_PROXY: 127.0.0.1,localhost
+      YIAI_DB_PATH: /app/data/yiai-center.sqlite
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "${YIAI_WEB_PORT:-19080}:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
