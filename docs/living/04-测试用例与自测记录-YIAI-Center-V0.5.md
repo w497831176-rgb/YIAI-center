@@ -13,12 +13,12 @@
 - 只有实际执行并取得证据的用例可以标记“通过”。
 - 未实际执行的页面体验必须写“待产品负责人手动验证”，不能用代码检查冒充视觉验收。
 - 这是面试演示项目，不建设 Playwright、浏览器容器和大型自动化测试工程。
-- 自动自测重点覆盖最容易做错且能由后端证明的契约：Release 固定、唯一 Agent、Trace 终态、Usage、成本和数据持久化。
+- 自动自测重点覆盖最容易做错且能由后端证明的契约：Release 固定、单一垂直 Agent、Trace 终态、Usage、成本和数据持久化。
 - 每次开发结束后，先更新本文件，再更新 05 实际实现说明。
 
 ## 1. 本次测试环境
 
-- 执行日期：2026-07-20。
+- 初始执行日期：2026-07-20；同版本纠偏回归：2026-07-21。
 - 目标主机：局域网 Windows 10 专业版。
 - CPU：Intel Core i7-14700K，20 核、28 逻辑处理器。
 - 内存：约 64 GB。
@@ -184,11 +184,12 @@
 - 缺失 Usage 不补零、不伪造成本。
 - 多 Agent 数组输出被拒绝。
 - Usage 缺失时答案继续返回、Run 成本为 null、生成疑似 Badcase。
+- 人民币价格快照、历史 USD Snap 兼容换算、历史对话聚合和 Trace 输入／回答证据。
 
 实际：
 
 - 4 条 unittest 全部通过。
-- 总耗时约 0.185 秒。
+- 2026-07-21 回归总耗时约 0.197 秒。
 
 状态：通过。
 
@@ -311,7 +312,7 @@
 
 - 保留代理配置修复前的 ERROR Run：
   `run_c8a77c0324a2460e9f45b7b46e048372`。
-- 该 Run 的 Trace 记录 Router 外部调用失败、确定性兜底路由、唯一 Agent 和最终 URLError。
+- 该 Run 的 Trace 记录 Router 外部调用失败、确定性兜底路由、单一垂直 Agent 和最终 URLError。
 - 没有为了“全绿”删除数据库记录。
 
 状态：通过。
@@ -358,6 +359,7 @@
 代表结果：
 
 - `run_bf042f987a964d4eacb04bf677591020` 的 Run Estimated Cost 为 0.00015442 USD。
+- 该历史 USD 事实保持不变；按固定演示汇率 7.20 的页面兼容展示为 0.001111824 CNY。
 
 预期：
 
@@ -368,6 +370,7 @@
 
 - 成本由 Provider Token 与单价快照计算。
 - 页面不使用字符数估算。
+- 新 Snap 直接保存 CNY 单价、官方 USD 原价和 7.20 汇率快照；旧 USD Snap 只读换算展示，不回写原始事实。
 
 状态：通过。
 
@@ -433,6 +436,88 @@
 
 状态：通过。
 
+### TC-055-05 历史对话列表
+
+预期：
+
+- `GET /api/conversations` 返回真实 Conversation。
+- 每项包含标题、创建时间、最近消息时间和消息数。
+- 页面点击历史项后读取原消息，不生成新 Run。
+
+实际：
+
+- 部署后接口返回 8 个历史对话。
+- 首项字段实际包含 `id`、`title`、`created_at`、`updated_at` 和 `message_count`。
+- 已部署前端只在用户主动发送新消息时调用 `/api/chat/stream`；历史选择只读取消息接口。
+
+状态：通过（API 和静态交互结构）；视觉体验待产品负责人手动验证。
+
+### TC-055-06 消息时间戳与气泡 Run 入口
+
+预期：
+
+- 用户消息和 AI 回答均显示消息时间。
+- AI 气泡下方显示 Run 状态、垂直 Agent、Release 和 Run 详情入口。
+- 点击后从右侧打开抽屉，并复用权威 Run 详情 API。
+
+实际：
+
+- 消息接口返回 `created_at`、`run_id`、`run_status`、`release_version` 和 `agent_name`。
+- 已部署 `app.js` 包含时间格式化、`data-message-run-id` 和 `/api/runs/{run_id}` 调用。
+- 已部署 CSS 包含右侧 `.run-drawer`。
+- 页面名称已经使用“垂直 Agent”，没有“唯一 Agent”展示文案。
+
+状态：通过（数据与静态结构）；抽屉视觉和点击体验待产品负责人手动验证。
+
+### TC-055-07 Trace 步骤内人民币 CloudCallSnap
+
+预期：
+
+- 每个 `cloud_call_completed` 通过 `cloud_call_id` 关联一个 CloudCallSnap。
+- Snap 在对应 Trace 步骤中显示人民币单价、三类 Token、延迟和本步成本。
+- Trace 最底部汇总整个 Run 的调用次数、Token、延迟和人民币成本。
+
+实际：
+
+- 新真实 Run `run_4e283b75bca3456cbd436bf2c5d93bf3` 有 2 个 CloudCallSnap。
+- 两个 Snap 均返回 `estimated_cost_cny` 和 CNY 单价快照。
+- Run 人民币汇总成本为 `0.000732816 CNY`，等于两个 Snap 人民币成本之和。
+- 已部署前端按 `cloud_call_id` 把 Snap 嵌入 `cloud_call_completed`，底部单独渲染 Run 汇总。
+
+状态：通过。
+
+### TC-055-08 Trace 输入与客服回答
+
+预期：
+
+- 新 Run 的 Trace 包含完整用户输入。
+- 成功 Run 的 Trace 包含完整客服最终回答和垂直 Agent。
+- 历史 Run 不补写事件，而是从已保存消息回显输入和回答。
+
+实际：
+
+- 新真实 Run 的事件顺序包含：
+  `run_started → user_message_received → release_pinned → … → assistant_response_completed → done`。
+- `user_message_received` 内容与实际输入一致。
+- `assistant_response_completed` 内容与消息表最终回答一致，回答长度 47 字符。
+- 修复前历史 Run 的 `messages.input` 和 `messages.output` 均可读取；历史事件数组没有被改写。
+
+状态：通过。
+
+### TC-055-09 同版本部署回归
+
+实际：
+
+- `app.js` 语法检查通过，共 696 行。
+- Python compileall 通过。
+- 4 条 unittest 通过。
+- `/api/health` 返回 `ok / V0.5.5`。
+- 当前数据库有 9 条 Run、8 个 Conversation，未清空历史数据。
+- `yiai-center-api-1` 为 `running/healthy`。
+- `immich_machine_learning` 仍为 `running`。
+
+状态：通过。
+
 ## 9. 部署隔离与 Git
 
 ### TC-DEP-01 不影响现有容器
@@ -478,7 +563,9 @@
 
 1. 在用户 TAB 分别输入一般咨询、投诉和工单问题。
 2. 观察回答是否持续生成。
-3. 查看右侧运行卡中的 Release、Agent、模型、Token、延迟和成本。
+3. 确认用户消息和 AI 回答都有时间戳。
+4. 点击 AI 气泡下方“查看 Run 详情”。
+5. 确认右侧抽屉展示输入、客服回答、完整 Trace、逐步人民币成本和底部汇总。
 
 状态：待手动。
 
@@ -489,7 +576,7 @@
 1. 在平台管理创建一个候选 Release。
 2. 确认创建候选后 Active Release 不变。
 3. 人工发布并在用户 TAB 发送新消息。
-4. 返回 Run 与 Trace 查看逐次 CloudCallSnap。
+4. 返回 Run 与 Trace，确认 CloudCallSnap 位于对应云调用 Trace 步骤内。
 5. 回滚到需要的历史 Release。
 
 状态：待手动。

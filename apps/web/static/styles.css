@@ -124,13 +124,14 @@ main {
 
 .chat-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: 260px minmax(0, 1fr);
   gap: 22px;
   max-width: 1400px;
   margin: 0 auto;
 }
 
 .chat-panel,
+.conversation-panel,
 .run-panel,
 .platform-content,
 .side-nav,
@@ -146,6 +147,85 @@ main {
   padding: 26px;
   display: flex;
   flex-direction: column;
+}
+
+.conversation-panel {
+  min-height: calc(100vh - 194px);
+  padding: 18px;
+  align-self: start;
+  position: sticky;
+  top: 20px;
+}
+
+.conversation-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #edf0f4;
+}
+
+.conversation-heading h2 {
+  margin: 3px 0 0;
+  font-size: 18px;
+}
+
+.icon-button {
+  width: 34px;
+  height: 34px;
+  border: 1px solid #d9e0e9;
+  border-radius: 10px;
+  background: white;
+  color: #455166;
+  font-size: 20px;
+}
+
+.conversation-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  max-height: calc(100vh - 270px);
+  overflow: auto;
+}
+
+.conversation-list button {
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: #f7f9fb;
+  padding: 11px;
+  text-align: left;
+}
+
+.conversation-list button.active {
+  border-color: #43b99a;
+  background: #eaf8f4;
+}
+
+.conversation-list strong,
+.conversation-list span,
+.conversation-list small {
+  display: block;
+}
+
+.conversation-list strong {
+  color: #344055;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-list span,
+.conversation-list small,
+.history-empty {
+  color: #929cab;
+  font-size: 10px;
+  margin-top: 6px;
+}
+
+.history-empty {
+  text-align: center;
+  padding: 28px 8px;
 }
 
 .section-heading {
@@ -265,7 +345,7 @@ main {
   background: #43b99a;
 }
 
-.message > div {
+.message > .message-body {
   max-width: 75%;
 }
 
@@ -283,11 +363,31 @@ main {
   border-radius: 14px 4px 14px 14px;
 }
 
-.message small {
-  display: block;
-  color: #9aa3b1;
-  margin-top: 5px;
-  font-size: 11px;
+.bubble-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  color: #8d97a6;
+  margin-top: 6px;
+  font-size: 10px;
+}
+
+.message.user .bubble-meta {
+  justify-content: flex-end;
+}
+
+.bubble-meta .status {
+  font-size: 8px;
+}
+
+.run-detail-link {
+  border: 0;
+  background: transparent;
+  color: #218069;
+  padding: 0;
+  font-size: 10px;
+  font-weight: 800;
 }
 
 .composer {
@@ -492,6 +592,13 @@ main {
   color: #7b8495;
 }
 
+.release-list small {
+  display: block;
+  color: #929cab;
+  margin-top: 8px;
+  font-size: 10px;
+}
+
 .status {
   display: inline-block;
   border-radius: 999px;
@@ -556,6 +663,13 @@ main {
   color: #8d97a6;
 }
 
+.runs-list time {
+  display: block;
+  color: #9aa3b1;
+  margin-top: 5px;
+  font-size: 10px;
+}
+
 .trace-panel {
   border: 1px solid #e4e8ef;
   border-radius: 12px;
@@ -584,7 +698,7 @@ main {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);
   gap: 8px;
-  padding: 8px 0;
+  padding: 11px 0;
   border-bottom: 1px solid #edf0f4;
 }
 
@@ -609,6 +723,168 @@ main {
   font-size: 10px;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+
+.trace-event {
+  min-width: 0;
+}
+
+.trace-event-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.trace-event-title time {
+  color: #929cab;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.run-detail-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #edf0f4;
+}
+
+.run-detail-head h2 {
+  margin: 5px 0;
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+.run-detail-head p,
+.section-note {
+  margin: 0;
+  color: #8993a3;
+  font-size: 11px;
+}
+
+.message-evidence,
+.trace-section,
+.run-total {
+  margin-top: 20px;
+}
+
+.message-evidence h3,
+.trace-section h3,
+.run-total h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+
+.message-evidence article {
+  margin-top: 9px;
+  padding: 11px 12px;
+  border: 1px solid #e4e8ef;
+  border-radius: 10px;
+  background: #fafbfc;
+}
+
+.message-evidence article strong,
+.message-evidence article time {
+  display: inline-block;
+}
+
+.message-evidence article time {
+  float: right;
+  color: #929cab;
+  font-size: 10px;
+}
+
+.message-evidence article p,
+.trace-message p {
+  margin: 7px 0 0;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.trace-message {
+  margin-top: 7px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: #f3f6fa;
+}
+
+.trace-message span {
+  color: #728096;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.assistant-trace {
+  border-left: 3px solid #43b99a;
+  background: #eff9f6;
+}
+
+.snap-card {
+  margin-top: 10px;
+  border: 1px solid #dce5ee;
+  border-radius: 12px;
+  padding: 12px;
+  background: #f7f9fc;
+}
+
+.snap-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.snap-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+  margin-top: 7px;
+}
+
+.price-snapshot {
+  margin: 9px 0 0;
+  color: #778397;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.run-total {
+  padding: 14px;
+  border: 1px solid #bfe8dc;
+  border-radius: 12px;
+  background: #eff9f6;
+}
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 24, 39, 0.4);
+  z-index: 40;
+}
+
+.run-drawer {
+  position: fixed;
+  z-index: 41;
+  top: 0;
+  right: 0;
+  width: min(720px, 92vw);
+  height: 100vh;
+  overflow: auto;
+  background: white;
+  box-shadow: -20px 0 45px rgba(17, 24, 39, 0.18);
+  padding: 24px;
+}
+
+.drawer-close {
+  display: block;
+  margin: 0 0 14px auto;
+  border: 1px solid #d9e0e9;
+  background: white;
+  color: #455166;
+  border-radius: 9px;
+  padding: 7px 11px;
 }
 
 .snap-list {
@@ -641,6 +917,15 @@ main {
 
   .run-panel {
     position: static;
+  }
+
+  .conversation-panel {
+    position: static;
+    min-height: auto;
+  }
+
+  .conversation-list {
+    max-height: 260px;
   }
 
   .release-form,
@@ -683,7 +968,12 @@ main {
     flex-direction: column;
   }
 
-  .message > div {
+  .message > .message-body {
     max-width: 88%;
+  }
+
+  .snap-grid,
+  .trace-summary {
+    grid-template-columns: 1fr;
   }
 }

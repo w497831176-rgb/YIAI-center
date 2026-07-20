@@ -103,6 +103,10 @@ class YIAIHandler(BaseHTTPRequestHandler):
                 query = parse_qs(parsed.query)
                 limit = max(1, min(200, int(query.get("limit", ["50"])[0])))
                 self._send_json(db.list_runs(limit))
+            elif path == "/api/conversations":
+                query = parse_qs(parsed.query)
+                limit = max(1, min(200, int(query.get("limit", ["100"])[0])))
+                self._send_json(db.list_conversations(limit))
             elif path.startswith("/api/runs/"):
                 run_id = path.removeprefix("/api/runs/")
                 try:

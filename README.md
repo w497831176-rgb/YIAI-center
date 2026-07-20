@@ -9,7 +9,9 @@
 - 用户、员工、平台管理三个顶层 TAB，无登录和身份系统。
 - 不可变 Release、Active Release、Run 固定和只追加 Trace。
 - DeepSeek V4-Flash 思考模式流式对话。
-- 每次云调用独立记录三类 Token、延迟、单价快照和 Estimated Cost。
+- 历史对话、消息时间戳，以及 AI 气泡下方可打开的右侧 Run 详情抽屉。
+- Trace 记录用户输入和客服最终回答；每次云调用独立记录三类 Token、延迟、人民币单价快照和人民币 Estimated Cost。
+- CloudCallSnap 嵌入对应 Trace 步骤，Run 底部提供人民币汇总。
 - 唯一 Router，每个 Run 只选择一个垂直 Agent。
 - 一般客服、投诉客服、工单处理三个默认 Agent。
 

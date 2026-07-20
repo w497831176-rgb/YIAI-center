@@ -77,6 +77,15 @@ def execute_chat(
     trace(run, "run_started", {"conversation_id": run["conversation_id"]})
     trace(
         run,
+        "user_message_received",
+        {
+            "message_id": run["user_message_id"],
+            "role": "user",
+            "content": content,
+        },
+    )
+    trace(
+        run,
         "release_pinned",
         {
             "release_id": run["release_id"],
@@ -188,6 +197,17 @@ def execute_chat(
             answer,
             latency_ms,
         )
+        trace(
+            run,
+            "assistant_response_completed",
+            {
+                "message_id": result["message_id"],
+                "role": "assistant",
+                "agent_id": agent["id"],
+                "agent_name": agent["name"],
+                "content": answer,
+            },
+        )
         done_payload = {
             "run_id": run["run_id"],
             "status": "DONE",
@@ -197,6 +217,8 @@ def execute_chat(
             "release_version": run["release_version"],
             "latency_ms": latency_ms,
             "estimated_cost": result["estimated_cost"],
+            "estimated_cost_cny": result["estimated_cost_cny"],
+            "display_currency": "CNY",
             "usage": {
                 "prompt_cache_miss_tokens": final_snap.get(
                     "prompt_cache_miss_tokens"

@@ -20,6 +20,7 @@ class Settings:
     flash_output_usd_per_m: float = float(
         os.getenv("DEEPSEEK_FLASH_OUTPUT_USD_PER_M", "0.28")
     )
+    usd_cny_rate: float = float(os.getenv("YIAI_USD_CNY_RATE", "7.20"))
 
     def validate_model_policy(self) -> None:
         if self.default_model != "deepseek-v4-flash":
@@ -28,7 +29,8 @@ class Settings:
             )
         if self.thinking_effort not in {"high", "max"}:
             raise RuntimeError("DeepSeek thinking effort must be high or max")
+        if self.usd_cny_rate <= 0:
+            raise RuntimeError("YIAI_USD_CNY_RATE must be greater than zero")
 
 
 settings = Settings()
-

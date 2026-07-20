@@ -70,12 +70,34 @@ class RuntimeUsageTests(unittest.TestCase):
                 detail = db.get_run_detail(run["id"])
                 self.assertEqual(detail["run"]["status"], "DONE")
                 self.assertIsNone(detail["run"]["estimated_cost"])
+                self.assertIsNone(detail["run"]["estimated_cost_cny"])
                 self.assertEqual(
                     detail["cloud_call_snaps"][1]["usage_status"], "INCOMPLETE"
+                )
+                self.assertAlmostEqual(
+                    detail["cloud_call_snaps"][0]["estimated_cost_cny"],
+                    0.0000028 * 7.2,
                 )
                 self.assertIsNone(
                     detail["cloud_call_snaps"][1]["prompt_cache_miss_tokens"]
                 )
+                event_by_type = {
+                    event["event_type"]: event for event in detail["trace_events"]
+                }
+                self.assertEqual(
+                    event_by_type["user_message_received"]["payload"]["content"],
+                    "测试 Usage 缺失",
+                )
+                self.assertEqual(
+                    event_by_type["assistant_response_completed"]["payload"]["content"],
+                    "答案仍然返回",
+                )
+                self.assertEqual(detail["messages"]["input"]["content"], "测试 Usage 缺失")
+                self.assertEqual(detail["messages"]["output"]["content"], "答案仍然返回")
+                conversations = db.list_conversations()
+                self.assertEqual(len(conversations), 1)
+                self.assertEqual(conversations[0]["message_count"], 2)
+                self.assertEqual(conversations[0]["title"], "测试 Usage 缺失")
                 with db.connection() as conn:
                     candidate_count = conn.execute(
                         "SELECT COUNT(*) AS n FROM badcase_candidates"

@@ -17,6 +17,10 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(usage["usage_status"], "COMPLETE")
         self.assertIsNotNone(usage["estimated_cost"])
+        self.assertEqual(usage["price_snapshot"]["currency"], "CNY")
+        self.assertEqual(
+            usage["price_snapshot"]["exchange_rate_snapshot"]["quote"], "CNY"
+        )
 
     def test_usage_missing_is_not_fabricated(self):
         usage = parse_usage({"prompt_tokens": 12}, "deepseek-v4-flash")

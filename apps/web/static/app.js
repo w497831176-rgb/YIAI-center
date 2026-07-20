@@ -3,13 +3,15 @@ const state = {
   platformSection: "release",
   workspace: null,
   messages: [],
+  conversations: [],
   conversationId: localStorage.getItem("yiai-conversation-id"),
   sending: false,
+  streamTerminal: null,
   run: null,
-  route: "",
   releases: [],
   runs: [],
   selectedRun: null,
+  drawerRun: null,
   notice: "",
 };
 
@@ -31,8 +33,41 @@ async function api(path, options = {}) {
   return response.json();
 }
 
+function formatTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function formatCny(value) {
+  return typeof value === "number" ? `¥${value.toFixed(8)}` : "用量异常，成本未知";
+}
+
 function displayToken(value) {
-  return Number.isInteger(value) ? String(value) : "待用量返回";
+  return Number.isInteger(value) ? String(value) : "null";
+}
+
+function agentName(id, fallback) {
+  if (fallback) return fallback;
+  return (
+    {
+      "general-service": "一般客服",
+      "complaint-service": "投诉客服",
+      "work-order-service": "工单处理",
+    }[id] ||
+    id ||
+    "路由中"
+  );
 }
 
 function fact(label, value) {
@@ -65,87 +100,107 @@ function shell(content) {
           .join("")}
       </nav>
       <main>${content}</main>
+      ${state.drawerRun ? runDrawer(state.drawerRun) : ""}
     </div>`;
 }
 
-function userPage() {
-  const messages =
-    state.messages.length === 0
-      ? `<div class="empty-state">
-          <div class="empty-icon">AI</div>
-          <strong>真实能力，从一条消息开始</strong>
-          <p>试试一般咨询、明确投诉，或询问工单处理。</p>
-          <div class="suggestions">
-            ${["帮我解释一下这个平台", "我要投诉服务体验", "查询我的工单进度"]
+function conversationList() {
+  return `<aside class="conversation-panel">
+    <div class="conversation-heading">
+      <div><span class="eyebrow">HISTORY</span><h2>历史对话</h2></div>
+      <button class="icon-button" data-action="new-conversation" title="新对话">＋</button>
+    </div>
+    <div class="conversation-list">
+      ${
+        state.conversations.length
+          ? state.conversations
               .map(
-                (item) =>
-                  `<button data-suggestion="${escapeHtml(item)}">${escapeHtml(item)}</button>`,
+                (conversation) => `<button
+                  data-conversation-id="${escapeHtml(conversation.id)}"
+                  class="${state.conversationId === conversation.id ? "active" : ""}">
+                  <strong>${escapeHtml(conversation.title)}</strong>
+                  <span>${formatTime(conversation.updated_at)}</span>
+                  <small>${conversation.message_count} 条消息</small>
+                </button>`,
               )
-              .join("")}
-          </div>
-        </div>`
-      : state.messages
+              .join("")
+          : `<div class="history-empty">还没有历史对话</div>`
+      }
+    </div>
+  </aside>`;
+}
+
+function messageMeta(message) {
+  const timestamp = `<time>${formatTime(message.created_at)}</time>`;
+  if (message.role !== "assistant") {
+    return `<div class="bubble-meta">${timestamp}</div>`;
+  }
+  const runId = message.run_id;
+  const agent = message.agent_id
+    ? `<span>垂直 Agent：${escapeHtml(agentName(message.agent_id, message.agent_name))}</span>`
+    : "";
+  const release = message.release_version
+    ? `<span>Release：${escapeHtml(message.release_version)}</span>`
+    : "";
+  const status = message.run_status
+    ? `<span class="status ${message.run_status.toLowerCase()}">${escapeHtml(message.run_status)}</span>`
+    : "";
+  const detail = runId
+    ? `<button class="run-detail-link" data-message-run-id="${escapeHtml(runId)}">查看 Run 详情 →</button>`
+    : "";
+  return `<div class="bubble-meta">${timestamp}${status}${agent}${release}${detail}</div>`;
+}
+
+function messageList() {
+  if (state.messages.length === 0) {
+    return `<div class="empty-state">
+      <div class="empty-icon">AI</div>
+      <strong>真实能力，从一条消息开始</strong>
+      <p>试试一般咨询、明确投诉，或询问工单处理。</p>
+      <div class="suggestions">
+        ${["帮我解释一下这个平台", "我要投诉服务体验", "查询我的工单进度"]
           .map(
-            (message) => `
-              <article class="message ${message.role}">
-                <span class="message-role">${message.role === "user" ? "你" : "AI"}</span>
-                <div>
-                  <p>${escapeHtml(message.content || (state.sending ? "正在生成回答…" : ""))}</p>
-                  ${
-                    message.release_version
-                      ? `<small>${escapeHtml(message.release_version)}${
-                          message.agent_id ? ` · ${escapeHtml(message.agent_id)}` : ""
-                        }</small>`
-                      : ""
-                  }
-                </div>
-              </article>`,
+            (item) =>
+              `<button data-suggestion="${escapeHtml(item)}">${escapeHtml(item)}</button>`,
           )
-          .join("");
+          .join("")}
+      </div>
+    </div>`;
+  }
+  return state.messages
+    .map(
+      (message) => `<article class="message ${message.role}">
+        <span class="message-role">${message.role === "user" ? "你" : "AI"}</span>
+        <div class="message-body">
+          <p>${escapeHtml(message.content || (state.sending ? "正在生成回答…" : ""))}</p>
+          ${messageMeta(message)}
+        </div>
+      </article>`,
+    )
+    .join("");
+}
 
-  const run = !state.run
-    ? `<div class="run-empty">发送消息后，这里展示真实运行证据。</div>`
-    : `<div class="run-facts">
-        ${fact("Run", state.run.run_id?.slice(0, 16) || "—")}
-        ${fact("Release", state.run.release_version || "—")}
-        ${fact("唯一 Agent", state.route || state.run.agent_name || "路由中")}
-        ${fact("模型", "deepseek-v4-flash · thinking")}
-        ${fact("输入未命中", displayToken(state.run.usage?.prompt_cache_miss_tokens))}
-        ${fact("输入命中", displayToken(state.run.usage?.prompt_cache_hit_tokens))}
-        ${fact("输出 Token", displayToken(state.run.usage?.completion_tokens))}
-        ${fact("总延迟", state.run.latency_ms ? `${state.run.latency_ms} ms` : "运行中")}
-        ${fact(
-          "Estimated Cost",
-          typeof state.run.estimated_cost === "number"
-            ? `$${state.run.estimated_cost.toFixed(8)}`
-            : "待用量返回",
-        )}
-      </div>`;
-
+function userPage() {
   return `<section class="chat-layout">
+    ${conversationList()}
     <div class="chat-panel">
       <div class="section-heading">
         <div>
           <span class="eyebrow">USER EXPERIENCE</span>
           <h1>今天想处理什么？</h1>
-          <p>每条消息都会创建可追踪的 Run，并由唯一 Router 选择一个 Agent。</p>
+          <p>每条用户请求创建一个 Run；Router 每次只选择一个垂直 Agent。</p>
         </div>
         <button class="ghost-button" data-action="new-conversation">新对话</button>
       </div>
-      <div class="message-list">${messages}</div>
+      <div class="message-list">${messageList()}</div>
       <form class="composer" id="chat-form">
         <textarea id="chat-input" placeholder="输入你的问题…" rows="2" ${
           state.sending ? "disabled" : ""
         }></textarea>
         <button ${state.sending ? "disabled" : ""}>${state.sending ? "运行中" : "发送"}</button>
       </form>
+      <p class="privacy-note">隐藏思考内容不展示、不保存；Run 详情只展示可核对的输入、输出和运行事实。</p>
     </div>
-    <aside class="run-panel">
-      <span class="eyebrow">CURRENT RUN</span>
-      <h2>本轮运行卡</h2>
-      ${run}
-      <p class="privacy-note">隐藏思考内容不展示、不保存；这里只展示运行事实。</p>
-    </aside>
   </section>`;
 }
 
@@ -184,6 +239,9 @@ function releasePanel() {
               <span class="status ${release.status.toLowerCase()}">${release.status}</span>
               <h3>${escapeHtml(release.version)}</h3>
               <p>${escapeHtml(release.change_summary)}</p>
+              <small>创建：${formatTime(release.created_at)}${
+                release.published_at ? ` · 发布：${formatTime(release.published_at)}` : ""
+              }</small>
             </div>
             ${
               release.status === "ACTIVE"
@@ -199,6 +257,158 @@ function releasePanel() {
   </div>`;
 }
 
+const eventLabels = {
+  run_started: "Run 开始",
+  user_message_received: "收到用户请求",
+  release_pinned: "固定 Release",
+  cloud_call_started: "云 API 调用开始",
+  cloud_call_completed: "云 API 调用完成",
+  router_fallback: "Router 兜底",
+  route_decision: "Router 决策",
+  agent_selected: "选择垂直 Agent",
+  assistant_response_completed: "客服回答完成",
+  done: "Run 完成",
+  error: "Run 失败",
+};
+
+function priceLine(pricing) {
+  if (!pricing) return "价格快照不可用";
+  return `未命中 ¥${Number(pricing.cache_miss_input || 0).toFixed(4)} · 命中 ¥${Number(
+    pricing.cache_hit_input || 0,
+  ).toFixed(4)} · 输出 ¥${Number(pricing.output || 0).toFixed(4)} / 百万 Token`;
+}
+
+function snapCard(snap) {
+  const pricing = snap.price_snapshot_cny;
+  const rate = pricing?.exchange_rate_snapshot?.rate;
+  return `<div class="snap-card">
+    <div class="snap-title">
+      <strong>CloudCallSnap · ${escapeHtml(snap.phase)}</strong>
+      <span class="status ${snap.status === "SUCCEEDED" ? "done" : "error"}">${escapeHtml(
+        snap.status,
+      )}</span>
+    </div>
+    <div class="snap-grid">
+      ${fact("Provider / 模型", `${snap.provider} / ${snap.model}`)}
+      ${fact("调用时间", `${formatTime(snap.request_started_at)} → ${formatTime(snap.response_finished_at)}`)}
+      ${fact("输入未命中", displayToken(snap.prompt_cache_miss_tokens))}
+      ${fact("输入命中", displayToken(snap.prompt_cache_hit_tokens))}
+      ${fact("输出 Token", displayToken(snap.completion_tokens))}
+      ${fact("本步延迟", `${snap.latency_ms} ms`)}
+      ${fact("本步成本", formatCny(snap.estimated_cost_cny))}
+      ${fact("Usage", snap.usage_status)}
+    </div>
+    <p class="price-snapshot">${escapeHtml(priceLine(pricing))}${
+      rate ? ` · 演示汇率快照 1 USD = ${escapeHtml(rate)} CNY` : ""
+    }</p>
+  </div>`;
+}
+
+function eventPayload(event) {
+  const payload = event.payload || {};
+  if (event.event_type === "user_message_received") {
+    return `<div class="trace-message user-trace"><span>用户输入</span><p>${escapeHtml(
+      payload.content,
+    )}</p></div>`;
+  }
+  if (event.event_type === "assistant_response_completed") {
+    return `<div class="trace-message assistant-trace"><span>${escapeHtml(
+      payload.agent_name || "垂直 Agent",
+    )}回答</span><p>${escapeHtml(payload.content)}</p></div>`;
+  }
+  return `<code>${escapeHtml(JSON.stringify(payload))}</code>`;
+}
+
+function messageEvidence(detail) {
+  const input = detail.messages?.input;
+  const output = detail.messages?.output;
+  return `<section class="message-evidence">
+    <h3>本次 Run 的输入与输出</h3>
+    <p class="section-note">历史 Run 从已保存消息回显；新 Run 同时写入下方 Trace 事件。</p>
+    <article>
+      <strong>用户输入</strong><time>${formatTime(input?.created_at)}</time>
+      <p>${escapeHtml(input?.content || "未找到输入消息")}</p>
+    </article>
+    <article>
+      <strong>${escapeHtml(agentName(output?.agent_id, detail.run.agent_name))}回答</strong>
+      <time>${formatTime(output?.created_at)}</time>
+      <p>${escapeHtml(output?.content || (detail.run.status === "ERROR" ? "本次 Run 未生成完整回答" : "未找到回答消息"))}</p>
+    </article>
+  </section>`;
+}
+
+function runSummary(detail) {
+  const snaps = detail.cloud_call_snaps || [];
+  const totals = snaps.reduce(
+    (sum, snap) => ({
+      miss: sum.miss + (Number.isInteger(snap.prompt_cache_miss_tokens) ? snap.prompt_cache_miss_tokens : 0),
+      hit: sum.hit + (Number.isInteger(snap.prompt_cache_hit_tokens) ? snap.prompt_cache_hit_tokens : 0),
+      output: sum.output + (Number.isInteger(snap.completion_tokens) ? snap.completion_tokens : 0),
+    }),
+    { miss: 0, hit: 0, output: 0 },
+  );
+  return `<section class="run-total">
+    <h3>Run 汇总</h3>
+    <div class="trace-summary">
+      ${fact("垂直 Agent", agentName(detail.run.agent_id))}
+      ${fact("云 API 调用", String(snaps.length))}
+      ${fact("输入未命中", String(totals.miss))}
+      ${fact("输入命中", String(totals.hit))}
+      ${fact("输出 Token", String(totals.output))}
+      ${fact("总延迟", detail.run.latency_ms ? `${detail.run.latency_ms} ms` : "—")}
+      ${fact("人民币总成本", formatCny(detail.run.estimated_cost_cny))}
+      ${fact("完成时间", formatTime(detail.run.finished_at))}
+    </div>
+  </section>`;
+}
+
+function runDetailContent(detail) {
+  const snapById = new Map(
+    (detail.cloud_call_snaps || []).map((snap) => [snap.cloud_call_id, snap]),
+  );
+  return `<div class="run-detail">
+    <div class="run-detail-head">
+      <div>
+        <span class="eyebrow">TRACEABLE RUN</span>
+        <h2>${escapeHtml(detail.run.id)}</h2>
+        <p>${escapeHtml(detail.run.release_version)} · 开始于 ${formatTime(detail.run.started_at)}</p>
+      </div>
+      <span class="status ${detail.run.status.toLowerCase()}">${escapeHtml(detail.run.status)}</span>
+    </div>
+    ${messageEvidence(detail)}
+    <section class="trace-section">
+      <h3>Trace 执行路径</h3>
+      <ol class="trace-list">
+        ${detail.trace_events
+          .map((event) => {
+            const snap = snapById.get(event.payload?.cloud_call_id);
+            return `<li>
+              <span>${event.sequence}</span>
+              <div class="trace-event">
+                <div class="trace-event-title">
+                  <strong>${escapeHtml(eventLabels[event.event_type] || event.event_type)}</strong>
+                  <time>${formatTime(event.created_at)}</time>
+                </div>
+                ${eventPayload(event)}
+                ${snap ? snapCard(snap) : ""}
+              </div>
+            </li>`;
+          })
+          .join("")}
+      </ol>
+    </section>
+    ${runSummary(detail)}
+  </div>`;
+}
+
+function runDrawer(detail) {
+  return `<div class="drawer-backdrop" data-action="close-drawer"></div>
+    <aside class="run-drawer" aria-label="Run 详情">
+      <button class="drawer-close" data-action="close-drawer">关闭 ×</button>
+      ${runDetailContent(detail)}
+    </aside>`;
+}
+
 function runsPanel() {
   const detail = state.selectedRun;
   return `<div class="platform-content">
@@ -206,7 +416,7 @@ function runsPanel() {
       <div>
         <span class="eyebrow">RUNTIME EVIDENCE</span>
         <h1>Run 与 Trace</h1>
-        <p>点击一条 Run 查看只追加事件和逐次云调用 Snap。</p>
+        <p>每个 Trace 步骤显示时间；调用云 API 的步骤内嵌对应成本快照，底部汇总本次 Run。</p>
       </div>
     </div>
     <div class="runs-grid">
@@ -219,8 +429,9 @@ function runsPanel() {
                     detail?.run?.id === run.id ? "selected" : ""
                   }">
                     <span class="status ${run.status.toLowerCase()}">${run.status}</span>
-                    <strong>${escapeHtml(run.agent_id || "路由中")}</strong>
+                    <strong>${escapeHtml(agentName(run.agent_id))}</strong>
                     <small>${escapeHtml(run.release_version)}</small>
+                    <time>${formatTime(run.started_at)}</time>
                   </button>`,
                 )
                 .join("")
@@ -228,51 +439,7 @@ function runsPanel() {
         }
       </div>
       <div class="trace-panel">
-        ${
-          !detail
-            ? `<div class="run-empty">选择一条 Run 查看证据。</div>`
-            : `<div class="trace-summary">
-                ${fact("Release", detail.run.release_version)}
-                ${fact("唯一 Agent", detail.run.agent_id || "—")}
-                ${fact("云调用次数", String(detail.cloud_call_snaps.length))}
-                ${fact(
-                  "Run 成本",
-                  typeof detail.run.estimated_cost === "number"
-                    ? `$${detail.run.estimated_cost.toFixed(8)}`
-                    : "用量异常",
-                )}
-              </div>
-              <h3>Trace Events</h3>
-              <ol class="trace-list">
-                ${detail.trace_events
-                  .map(
-                    (event) => `<li>
-                      <span>${event.sequence}</span>
-                      <div><strong>${escapeHtml(event.event_type)}</strong>
-                      <code>${escapeHtml(JSON.stringify(event.payload))}</code></div>
-                    </li>`,
-                  )
-                  .join("")}
-              </ol>
-              <h3>CloudCallSnap</h3>
-              <div class="snap-list">
-                ${detail.cloud_call_snaps
-                  .map(
-                    (snap) => `<article>
-                      <strong>${escapeHtml(snap.phase)} · ${escapeHtml(snap.model)}</strong>
-                      <p>miss ${snap.prompt_cache_miss_tokens ?? "null"} · hit ${
-                        snap.prompt_cache_hit_tokens ?? "null"
-                      } · output ${snap.completion_tokens ?? "null"}</p>
-                      <small>${snap.usage_status} · ${snap.latency_ms} ms · ${
-                        typeof snap.estimated_cost === "number"
-                          ? `$${snap.estimated_cost.toFixed(8)}`
-                          : "cost null"
-                      }</small>
-                    </article>`,
-                  )
-                  .join("")}
-              </div>`
-        }
+        ${detail ? runDetailContent(detail) : `<div class="run-empty">选择一条 Run 查看证据。</div>`}
       </div>
     </div>
   </div>`;
@@ -309,31 +476,59 @@ function render() {
   bindEvents();
 }
 
+function startNewConversation() {
+  localStorage.removeItem("yiai-conversation-id");
+  state.conversationId = null;
+  state.messages = [];
+  state.run = null;
+  state.drawerRun = null;
+  render();
+}
+
+async function selectConversation(conversationId) {
+  state.conversationId = conversationId;
+  localStorage.setItem("yiai-conversation-id", conversationId);
+  state.messages = await api(`/api/conversations/${conversationId}/messages`);
+  state.drawerRun = null;
+  render();
+}
+
+async function openRunDrawer(runId) {
+  state.drawerRun = await api(`/api/runs/${runId}`);
+  render();
+}
+
 function bindEvents() {
   document.querySelectorAll("[data-tab]").forEach((button) => {
     button.addEventListener("click", async () => {
       state.tab = button.dataset.tab;
       if (state.tab === "platform") await loadPlatform();
+      if (state.tab === "user") await loadConversations();
       render();
     });
   });
 
-  document.querySelector("[data-action='new-conversation']")?.addEventListener("click", () => {
-    localStorage.removeItem("yiai-conversation-id");
-    state.conversationId = null;
-    state.messages = [];
-    state.run = null;
-    state.route = "";
-    render();
+  document.querySelectorAll("[data-action='new-conversation']").forEach((button) => {
+    button.addEventListener("click", startNewConversation);
   });
-
+  document.querySelectorAll("[data-action='close-drawer']").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.drawerRun = null;
+      render();
+    });
+  });
+  document.querySelectorAll("[data-conversation-id]").forEach((button) => {
+    button.addEventListener("click", () => selectConversation(button.dataset.conversationId));
+  });
+  document.querySelectorAll("[data-message-run-id]").forEach((button) => {
+    button.addEventListener("click", () => openRunDrawer(button.dataset.messageRunId));
+  });
   document.querySelectorAll("[data-suggestion]").forEach((button) => {
     button.addEventListener("click", () => {
       document.querySelector("#chat-input").value = button.dataset.suggestion;
       document.querySelector("#chat-input").focus();
     });
   });
-
   document.querySelector("#chat-input")?.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -361,6 +556,10 @@ function bindEvents() {
       render();
     });
   });
+}
+
+async function loadConversations() {
+  state.conversations = await api("/api/conversations");
 }
 
 async function loadPlatform() {
@@ -402,11 +601,12 @@ async function sendChat(event) {
   const input = document.querySelector("#chat-input");
   const text = input.value.trim();
   if (!text || state.sending) return;
+  const now = new Date().toISOString();
   state.sending = true;
-  state.route = "";
+  state.streamTerminal = null;
   state.run = null;
-  state.messages.push({ role: "user", content: text });
-  state.messages.push({ role: "assistant", content: "" });
+  state.messages.push({ role: "user", content: text, created_at: now });
+  state.messages.push({ role: "assistant", content: "", created_at: now });
   render();
   try {
     const response = await fetch("/api/chat/stream", {
@@ -427,9 +627,18 @@ async function sendChat(event) {
       for (const block of blocks) handleSseBlock(block);
     }
   } catch {
-    state.messages[state.messages.length - 1].content = "连接中断，请稍后重试。";
+    state.streamTerminal = "error";
+    const message = state.messages[state.messages.length - 1];
+    message.content = "连接中断，请稍后重试。";
+    message.run_status = "ERROR";
   } finally {
     state.sending = false;
+    if (state.conversationId) {
+      if (state.streamTerminal === "done") {
+        state.messages = await api(`/api/conversations/${state.conversationId}/messages`);
+      }
+      await loadConversations();
+    }
     render();
   }
 }
@@ -440,6 +649,7 @@ function handleSseBlock(block) {
   const dataLine = lines.find((line) => line.startsWith("data: "))?.slice(6);
   if (!eventName || !dataLine) return;
   const data = JSON.parse(dataLine);
+  const assistant = state.messages[state.messages.length - 1];
   if (eventName === "run_started") {
     state.conversationId = data.conversation_id;
     localStorage.setItem("yiai-conversation-id", data.conversation_id);
@@ -447,15 +657,24 @@ function handleSseBlock(block) {
       run_id: data.run_id,
       release_version: data.release_version,
     };
+    assistant.run_id = data.run_id;
+    assistant.release_version = data.release_version;
+    assistant.run_status = "RUNNING";
   } else if (eventName === "agent_selected") {
-    state.route = data.agent_name;
     state.run = { ...(state.run || {}), ...data };
+    assistant.agent_id = data.agent_id;
+    assistant.agent_name = data.agent_name;
   } else if (eventName === "delta") {
-    state.messages[state.messages.length - 1].content += data.content;
+    assistant.content += data.content;
   } else if (eventName === "done") {
+    state.streamTerminal = "done";
     state.run = { ...(state.run || {}), ...data };
+    assistant.run_status = "DONE";
   } else if (eventName === "error") {
-    state.messages[state.messages.length - 1].content = data.message;
+    state.streamTerminal = "error";
+    assistant.content = data.message;
+    assistant.run_id = data.run_id || assistant.run_id;
+    assistant.run_status = "ERROR";
   }
   render();
 }
@@ -463,6 +682,7 @@ function handleSseBlock(block) {
 async function boot() {
   try {
     state.workspace = await api("/api/workspace");
+    await loadConversations();
     if (state.conversationId) {
       state.messages = await api(`/api/conversations/${state.conversationId}/messages`);
     }

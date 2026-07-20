@@ -27,6 +27,10 @@ V0.5.0—V0.5.5 已形成一个可以真实演示的最小闭环：
 7. 每次云调用分别记录模型、三类 Token、延迟、单价快照和成本。
 8. 平台管理可以查看 Release、Run、Trace 和 CloudCallSnap。
 9. 人工发布或回滚只影响之后的新消息，历史气泡不变。
+10. 用户页显示历史对话和所有消息时间戳。
+11. AI 气泡下方可以打开右侧 Run 详情抽屉。
+12. 新 Run 的 Trace 同时记录完整用户输入和客服最终回答。
+13. CloudCallSnap 直接嵌入对应 Trace 步骤，页面统一显示人民币本步成本，底部汇总 Run 总成本。
 
 当前访问地址：
 
@@ -73,23 +77,29 @@ V0.5.0—V0.5.5 已形成一个可以真实演示的最小闭环：
 用户页面实际包括：
 
 - 新对话按钮。
+- 历史对话列表：标题、最近消息时间和消息数。
 - 对话消息区。
+- 用户与 AI 消息时间戳。
 - 三个示例问题快捷按钮。
 - 输入框和发送按钮。
 - SSE 流式回答。
-- 当前 Run 运行卡。
+- AI 气泡下方的 Run 状态、垂直 Agent、Release 和详情入口。
+- 从右侧打开的 Run 详情抽屉。
 
-运行卡实际展示：
+Run 详情实际展示：
 
 - Run ID。
 - Release。
-- 唯一 Agent。
+- 垂直 Agent。
 - 固定模型 `deepseek-v4-flash · thinking`。
+- 本次用户输入和客服最终回答。
+- 每个 TraceEvent 的时间。
+- 嵌在云调用完成步骤中的 CloudCallSnap。
 - 输入缓存未命中 Token。
 - 输入缓存命中 Token。
 - 输出 Token。
 - 总延迟。
-- Estimated Cost。
+- 每步人民币成本和 Run 人民币总成本。
 
 页面明确说明隐藏思考内容不展示、不保存。
 
@@ -117,10 +127,11 @@ Release 页面：
 Run 与 Trace 页面：
 
 - 查看真实 Run 列表。
-- 查看 Run 状态、Release 和唯一 Agent。
+- 查看 Run 状态、时间、Release 和垂直 Agent。
 - 查看只追加 Trace Event。
-- 查看每次 Router／主 Agent 云调用的 CloudCallSnap。
-- 查看三类 Token、延迟、Usage 状态和成本。
+- 查看 Run 的用户输入与客服回答。
+- 在对应 Trace 步骤内查看每次 Router／主 Agent 云调用的 CloudCallSnap。
+- 查看三类 Token、延迟、Usage 状态、人民币本步成本和 Run 底部汇总。
 
 Agent、Skill、RAG、MCP、Badcase 和完整成本治理页面只显示为后续版本，不提供假按钮。
 
@@ -251,6 +262,14 @@ Adapter 只输出最终 `content`。
 - V4-Flash 缓存未命中输入：0.14 USD／百万 Token。
 - V4-Flash 输出：0.28 USD／百万 Token。
 
+页面人民币口径：
+
+- 固定演示汇率：`1 USD = 7.20 CNY`。
+- 新 Snap 保存换算后的 CNY 单价、官方 USD 原价和汇率快照。
+- 新 Run 的 `estimated_cost` 按 Snap 快照币种计算；API 明确输出 `estimated_cost_cny`。
+- 修复前的历史 USD Snap 不改写，API 只读生成 CNY 兼容展示字段。
+- 该汇率只用于面试演示对账，不宣称是实时外汇牌价。
+
 单价来源：
 
 - `https://api-docs.deepseek.com/quick_start/pricing/`。
@@ -267,6 +286,7 @@ Adapter 只输出最终 `content`。
 → 写入用户消息
 → 创建 RUNNING Run
 → 写 run_started
+→ 写 user_message_received（完整用户输入）
 → 写 release_pinned
 → V4-Flash Router 调用
 → 解析唯一 RouteDecision
@@ -275,6 +295,7 @@ Adapter 只输出最终 `content`。
 → 持续发送 delta
 → 保存主 Agent CloudCallSnap
 → 保存 AI 消息
+→ 写 assistant_response_completed（完整客服回答）
 → 聚合 Run 成本
 → 写 done
 ```
@@ -313,6 +334,8 @@ Router 云调用失败或结构非法时：
 - `app.js`。
 
 前端只调用公开 API，不自行写成本和 Release 事实。
+
+气泡抽屉和平台管理共用同一个 Run 详情渲染函数与 `GET /api/runs/{run_id}`，没有第二套 Trace 或成本计算。
 
 ### 5.7 `apps/api/tests`
 
@@ -445,6 +468,7 @@ Release：
 对话：
 
 - `POST /api/chat/stream`
+- `GET /api/conversations`
 - `GET /api/conversations/{conversation_id}/messages`
 
 Run 与 Trace：
@@ -473,6 +497,7 @@ Run 与 Trace：
 - `DEEPSEEK_DEFAULT_MODEL`。
 - `DEEPSEEK_THINKING_EFFORT`。
 - 三个 V4-Flash 单价变量。
+- `YIAI_USD_CNY_RATE`，当前固定为 7.20。
 - `YIAI_HTTPS_PROXY`。
 - `YIAI_WEB_PORT`。
 
@@ -506,6 +531,10 @@ Run 与 Trace：
 - [Y] V4-Flash 思考模式。
 - [Y] 每次云调用独立 Snap。
 - [Y] 三类 Token 和 Estimated Cost。
+- [Y] 历史对话列表和消息时间戳。
+- [Y] AI 气泡右侧 Run 详情抽屉。
+- [Y] Trace 保存新 Run 的完整输入和客服回答。
+- [Y] 每个云调用 Trace 步骤内显示人民币 Snap 成本，底部汇总 Run。
 - [Y] Usage 缺失时不丢答案、不编造数字。
 - [N] 没有自动升级 V4-Pro。
 - [N] 没有保存隐藏思考内容。
@@ -553,8 +582,9 @@ Trace 证明：
 
 修复后：
 
-- 4 条真实 Run DONE。
-- 8 个 CloudCallSnap 全部 V4-Flash 且 Usage COMPLETE。
+- 原有 4 条真实 Run DONE，后续手动体验与本轮自测继续追加真实 Run。
+- 本轮代表 Run `run_4e283b75bca3456cbd436bf2c5d93bf3` 为 DONE，包含 2 个 V4-Flash CloudCallSnap、完整输入事件和完整回答事件。
+- 本轮部署后共有 9 条 Run 和 8 个 Conversation，历史记录均保留。
 
 该 ERROR Run 不删除，用于展示真实 Trace 和问题闭环。
 

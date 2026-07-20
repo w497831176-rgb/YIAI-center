@@ -14,7 +14,7 @@
 - `[N]`：当前架构共识下不采用；不代表未来永久禁止。
 - Y/N 是当前最优技术判断，可以根据目标主机、真实依赖、验证结果和产品变化动态调整。
 - 本文件用于防止注意力漂移、重复造权威和局部补丁失控，不是为了强迫事实适配旧设计。
-- 真实证据与当前架构冲突时，先停止扩散修改，说明证据和影响，更新三份文档后再继续。
+- 真实证据与当前架构冲突时，先停止扩散修改，说明证据和影响，更新五份文档后再继续。
 - 允许重构、替换技术栈和改变边界，但不得静默进行。
 - 本文件只描述全局架构、状态、契约、数据和部署边界。
 - 具体开发顺序、当前完成度和下一步只写在版本规划。
@@ -33,7 +33,7 @@
 
 ## 2. 技术栈
 
-- [Y] V0.5 前端使用原生 HTML、CSS 和 JavaScript，由 FastAPI 同源提供静态文件。
+- [Y] V0.5 前端使用原生 HTML、CSS 和 JavaScript，由同一个 Python 标准库 HTTP 服务同源提供静态文件。
 - [Y] 当前页面复杂度不需要单独前端构建链；出现复杂可复用组件需求时再评估 React。
 - [N] 当前不引入 Node、Vite 和 Nginx 镜像，避免目标机 Docker Hub 代理问题增加演示复杂度。
 - [Y] V0.5 后端使用 Python 3.12 标准库 HTTP Server、SQLite 和 urllib，保持零第三方运行依赖。
@@ -92,7 +92,7 @@ reasoning_effort: high
 
 ### 3.3 Runtime Kernel
 
-- [Y] Runtime Kernel 是 Run、Router、唯一 Agent、能力编排和终态的唯一权威。
+- [Y] Runtime Kernel 是 Run、Router、单一垂直 Agent 选择、能力编排和终态的唯一权威。
 - [Y] 每条新消息创建新 Run。
 - [Y] 每个 Run 固定一个 release_id。
 - [Y] 每个 Run 最多选择一个 vertical_agent_version_id。
@@ -348,6 +348,9 @@ AI_ACTIVE → CLOSED
 - [Y] TraceEvent 只追加，不原地修改。
 - [Y] 每个 Run 必须且只能有一个 done 或 error 终态。
 - [Y] 每个事件关联 run_id、release_id、sequence 和 timestamp。
+- [Y] `user_message_received` 保存本 Run 的用户消息 ID、角色和完整输入内容。
+- [Y] `assistant_response_completed` 保存本 Run 的回答消息 ID、垂直 Agent 和完整最终回答。
+- [Y] Run 详情同时读取消息事实记录；历史 Run 没有上述新事件时，从既有消息记录回显输入和回答，但不得补写或伪造历史 TraceEvent。
 - [Y] 每个外部调用都有 started 和 completed／failed Snap。
 - [N] 不保存隐藏思维链、API Key、Bearer Token、Cookie 和数据库连接。
 
@@ -387,6 +390,9 @@ evaluation
 ```
 
 若一个 Run 有两次模型调用，必须生成两个 CloudCallSnap，不能只保存 Run 汇总。
+
+- [Y] Run 查询读模型把 `cloud_call_id` 与 `cloud_call_completed` 事件关联，使 CloudCallSnap 在对应 Trace 步骤内展示。
+- [Y] Run 汇总位于 Trace 路径之后，只从该 Run 的 Snap 聚合，不覆盖逐步事实。
 
 ### 13.3 DeepSeek Usage
 
@@ -446,6 +452,9 @@ error_code
 
 - [Y] 每个 CloudCallSnap 保存当时单价快照。
 - [Y] DeepSeek Estimated Cost 按缓存未命中输入、缓存命中输入和输出分别计算。
+- [Y] 新 CloudCallSnap 的用户展示币种为 CNY；快照同时保留 DeepSeek 官方 USD 原价、固定演示汇率和换算后的人民币单价。
+- [Y] V0.5.5 固定演示汇率为 `1 USD = 7.20 CNY`，用于面试演示对账，不宣称是实时外汇牌价。
+- [Y] 旧 USD CloudCallSnap 保持原始事实不变；查询读模型使用同一固定演示汇率生成兼容的人民币展示字段，不回写旧 Snap。
 - [Y] Run 成本等于 CloudCallSnap 成本之和。
 - [Y] Release、Agent、模型和时间汇总从 Run 聚合。
 - [Y] CostPolicyVersion 随 Release 固定。
@@ -560,6 +569,13 @@ COST_PERFORMANCE
 - 已执行写操作审计。
 - 历史单价快照。
 
+会话与 Run 查询读模型：
+
+- `GET /api/conversations` 从 Conversation 与 Message 事实生成历史列表，包含标题、创建时间、最近消息时间和消息数。
+- `GET /api/conversations/{conversation_id}/messages` 返回消息时间、run_id、Run 状态、Release 和垂直 Agent 展示名。
+- `GET /api/runs/{run_id}` 返回 Run、输入/输出消息、TraceEvent 和逐次 CloudCallSnap 的同一份只读详情。
+- 前端气泡和平台管理复用同一个 Run 详情 API，不建立第二套 Trace 或成本逻辑。
+
 ## 18. SSE 运行事件
 
 至少支持：
@@ -667,7 +683,7 @@ error
 每次编码前必须输出：
 
 ```text
-三份文档版本：
+五份文档版本：
 本次产品 Y/N：
 本次架构 Y/N：
 只完成的小功能：
@@ -679,14 +695,14 @@ error
 
 - [Y] 一个任务只完成一个可验收切片。
 - [Y] 同一故障两次尝试没有新增证据时停止碰运气并报告阻塞点。
-- [Y] 完成后同步更新三份文档版本。
+- [Y] 完成后同步更新五份文档版本。
 - [Y] 只把已验证事实标为完成。
 - [N] 不因局部 Bug 跨模块重写。
 - [N] 未经用户确认不得突破本文件的 `[N]`。
 
 ## 23. 当前架构禁区
 
-以下是 V0.5.0 当前不采用的实现，不是永远不可修改的教条。若真实验证证明必须调整，应先给出原因、替代方案和影响范围，并同步更新三份文档。
+以下是 V0.5.0 当前不采用的实现，不是永远不可修改的教条。若真实验证证明必须调整，应先给出原因、替代方案和影响范围，并同步更新五份文档。
 
 - [N] 第二个配置事实来源。
 - [N] 第二个 Release 权威。

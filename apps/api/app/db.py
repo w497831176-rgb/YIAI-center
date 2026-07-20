@@ -203,6 +203,70 @@ def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def _cost_to_cny(estimated_cost: float | None, price_snapshot: dict[str, Any]) -> float | None:
+    if estimated_cost is None:
+        return None
+    currency = str(price_snapshot.get("currency", "USD")).upper()
+    if currency == "CNY":
+        return estimated_cost
+    if currency == "USD":
+        rate = (
+            price_snapshot.get("exchange_rate_snapshot", {}).get("rate")
+            or settings.usd_cny_rate
+        )
+        return estimated_cost * float(rate)
+    return None
+
+
+def _price_snapshot_cny(price_snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    currency = str(price_snapshot.get("currency", "USD")).upper()
+    if currency == "CNY":
+        return price_snapshot
+    if currency != "USD":
+        return None
+    rate = settings.usd_cny_rate
+    return {
+        "currency": "CNY",
+        "unit": price_snapshot.get("unit", "per_1m_tokens"),
+        "cache_hit_input": float(price_snapshot.get("cache_hit_input", 0)) * rate,
+        "cache_miss_input": float(price_snapshot.get("cache_miss_input", 0)) * rate,
+        "output": float(price_snapshot.get("output", 0)) * rate,
+        "provider_list_price_usd": {
+            "cache_hit_input": price_snapshot.get("cache_hit_input"),
+            "cache_miss_input": price_snapshot.get("cache_miss_input"),
+            "output": price_snapshot.get("output"),
+        },
+        "exchange_rate_snapshot": {
+            "base": "USD",
+            "quote": "CNY",
+            "rate": rate,
+            "source": "YIAI_USD_CNY_RATE demo configuration",
+        },
+        "source": price_snapshot.get("source"),
+    }
+
+
+def _run_cost_cny(conn: sqlite3.Connection, run_id: str) -> float | None:
+    rows = conn.execute(
+        """
+        SELECT usage_status, estimated_cost, price_snapshot_json
+        FROM cloud_call_snaps WHERE run_id=?
+        """,
+        (run_id,),
+    ).fetchall()
+    if not rows or any(
+        row["usage_status"] != "COMPLETE" or row["estimated_cost"] is None for row in rows
+    ):
+        return None
+    costs = [
+        _cost_to_cny(row["estimated_cost"], json.loads(row["price_snapshot_json"]))
+        for row in rows
+    ]
+    if any(cost is None for cost in costs):
+        return None
+    return sum(costs)
+
+
 def get_workspace() -> dict[str, Any]:
     with connection() as conn:
         row = conn.execute(
@@ -327,6 +391,7 @@ def prepare_run(conversation_id: str | None, content: str) -> dict[str, Any]:
     return {
         "run_id": run_id,
         "conversation_id": conversation_id,
+        "user_message_id": message_id,
         "release_id": active["id"],
         "release_version": active["version"],
         "release_config": json.loads(active["config_json"]),
@@ -417,6 +482,37 @@ def conversation_history(conversation_id: str, limit: int = 12) -> list[dict[str
         return [dict(row) for row in reversed(rows)]
 
 
+def list_conversations(limit: int = 100) -> list[dict[str, Any]]:
+    with connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT c.id,
+                   c.created_at,
+                   MAX(m.created_at) AS updated_at,
+                   COUNT(m.id) AS message_count,
+                   (
+                       SELECT first_user.content
+                       FROM messages first_user
+                       WHERE first_user.conversation_id=c.id
+                         AND first_user.role='user'
+                       ORDER BY first_user.created_at, first_user.id
+                       LIMIT 1
+                   ) AS first_user_message
+            FROM conversations c
+            JOIN messages m ON m.conversation_id=c.id
+            GROUP BY c.id, c.created_at
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        result = rows_to_dicts(rows)
+        for item in result:
+            title = (item.pop("first_user_message") or "新对话").strip()
+            item["title"] = title[:32] + ("…" if len(title) > 32 else "")
+        return result
+
+
 def finish_run(
     run_id: str,
     release_id: str,
@@ -456,7 +552,12 @@ def finish_run(
             """,
             (agent_id, now_iso(), latency_ms, cost, run_id),
         )
-    return {"message_id": message_id, "estimated_cost": cost}
+        estimated_cost_cny = _run_cost_cny(conn, run_id)
+    return {
+        "message_id": message_id,
+        "estimated_cost": cost,
+        "estimated_cost_cny": estimated_cost_cny,
+    }
 
 
 def fail_run(run_id: str, error_code: str) -> None:
@@ -484,7 +585,11 @@ def list_runs(limit: int = 50) -> list[dict[str, Any]]:
             """,
             (limit,),
         ).fetchall()
-        return rows_to_dicts(rows)
+        result = rows_to_dicts(rows)
+        for item in result:
+            item["estimated_cost_cny"] = _run_cost_cny(conn, item["id"])
+            item["display_currency"] = "CNY"
+        return result
 
 
 def get_run_detail(run_id: str) -> dict[str, Any]:
@@ -517,17 +622,65 @@ def get_run_detail(run_id: str) -> dict[str, Any]:
         )
         for snap in snaps:
             snap["price_snapshot"] = json.loads(snap.pop("price_snapshot_json"))
-        return {"run": dict(run), "trace_events": events, "cloud_call_snaps": snaps}
+            snap["price_snapshot_cny"] = _price_snapshot_cny(snap["price_snapshot"])
+            snap["estimated_cost_cny"] = _cost_to_cny(
+                snap["estimated_cost"], snap["price_snapshot"]
+            )
+            snap["display_currency"] = "CNY"
+        run_result = dict(run)
+        run_result["estimated_cost_cny"] = _run_cost_cny(conn, run_id)
+        run_result["display_currency"] = "CNY"
+        input_message = conn.execute(
+            """
+            SELECT id, role, content, created_at
+            FROM messages WHERE id=?
+            """,
+            (run_result["user_message_id"],),
+        ).fetchone()
+        output_message = conn.execute(
+            """
+            SELECT id, role, content, agent_id, created_at
+            FROM messages
+            WHERE run_id=? AND role='assistant'
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        return {
+            "run": run_result,
+            "messages": {
+                "input": dict(input_message) if input_message else None,
+                "output": dict(output_message) if output_message else None,
+            },
+            "trace_events": events,
+            "cloud_call_snaps": snaps,
+        }
 
 
 def get_messages(conversation_id: str) -> list[dict[str, Any]]:
     with connection() as conn:
         rows = conn.execute(
             """
-            SELECT m.*, r.version AS release_version
-            FROM messages m LEFT JOIN releases r ON r.id=m.release_id
+            SELECT m.*, rel.version AS release_version, rel.config_json,
+                   run.status AS run_status, run.started_at AS run_started_at,
+                   run.finished_at AS run_finished_at
+            FROM messages m
+            LEFT JOIN releases rel ON rel.id=m.release_id
+            LEFT JOIN runs run ON run.id=m.run_id
             WHERE m.conversation_id=? ORDER BY m.created_at
             """,
             (conversation_id,),
         ).fetchall()
-        return rows_to_dicts(rows)
+        result = rows_to_dicts(rows)
+        for message in result:
+            config_json = message.pop("config_json", None)
+            agent_id = message.get("agent_id")
+            message["agent_name"] = None
+            if config_json and agent_id:
+                config = json.loads(config_json)
+                match = next(
+                    (agent for agent in config.get("agents", []) if agent["id"] == agent_id),
+                    None,
+                )
+                message["agent_name"] = match["name"] if match else agent_id
+        return result

@@ -18,12 +18,24 @@ def iso_now() -> str:
 def price_snapshot(model: str) -> dict[str, Any]:
     if model != "deepseek-v4-flash":
         raise ValueError("Ordinary runtime cannot select the expert model")
-    return {
-        "currency": "USD",
-        "unit": "per_1m_tokens",
+    provider_prices = {
         "cache_hit_input": settings.flash_cache_hit_usd_per_m,
         "cache_miss_input": settings.flash_cache_miss_usd_per_m,
         "output": settings.flash_output_usd_per_m,
+    }
+    return {
+        "currency": "CNY",
+        "unit": "per_1m_tokens",
+        "cache_hit_input": provider_prices["cache_hit_input"] * settings.usd_cny_rate,
+        "cache_miss_input": provider_prices["cache_miss_input"] * settings.usd_cny_rate,
+        "output": provider_prices["output"] * settings.usd_cny_rate,
+        "provider_list_price_usd": provider_prices,
+        "exchange_rate_snapshot": {
+            "base": "USD",
+            "quote": "CNY",
+            "rate": settings.usd_cny_rate,
+            "source": "YIAI_USD_CNY_RATE demo configuration",
+        },
         "source": "https://api-docs.deepseek.com/quick_start/pricing/",
     }
 
