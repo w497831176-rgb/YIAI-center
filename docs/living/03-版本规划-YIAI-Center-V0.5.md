@@ -69,7 +69,7 @@
 
 - V0.5.0 三份全局文档基线：已确认并完成。
 - V0.5.1—V0.5.5：已在同一授权批次完成实现、部署和后端自测。
-- 产品代码：已推送到 GitHub `main`，当前提交 `e47ca3f`。
+- 产品代码：已推送到 GitHub `main`；核心实现提交为 `e47ca3f`，Living Docs 在后续提交持续同步。
 - Windows 10 Docker 主机：只读检查完成；独立 Compose `yiai-center` 已部署。
 - DeepSeek API：V4-Flash 非流式、流式和真实运行 Gate 已通过。
 - 当前访问地址：`http://192.168.50.232:19080`。

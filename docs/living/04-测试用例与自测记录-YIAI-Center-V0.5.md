@@ -31,7 +31,7 @@
 - 数据文件：`D:\docker\yiai-center\data\yiai-center.sqlite`。
 - 模型：`deepseek-v4-flash`。
 - 模型模式：thinking enabled，reasoning effort high。
-- GitHub 最终提交：`e47ca3f`。
+- GitHub 核心实现提交：`e47ca3f`；Living Docs 在后续提交持续同步。
 
 ## 2. 状态定义
 
@@ -508,4 +508,3 @@
 - 当前容器 healthy，Active Release 为 `V0.5.5-default`。
 - 可以交给产品负责人进行浏览器手动体验。
 - 手动体验通过前，不把 UI 视觉和交互标记为最终验收完成。
-
