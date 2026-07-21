@@ -1473,6 +1473,196 @@ main {
   color: #8993a3;
 }
 
+.codrive-banner {
+  margin: 16px 0;
+  padding: 14px 16px;
+  border: 1px solid #dfe5ed;
+  border-radius: 14px;
+  background: #f7f9fb;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.codrive-banner.ai-active {
+  border-color: #bfe4d8;
+  background: #eff9f6;
+}
+
+.codrive-banner.human-active {
+  border-color: #d9c9f2;
+  background: #f7f2fd;
+}
+
+.codrive-banner.waiting {
+  border-color: #f1d9a7;
+  background: #fff9ed;
+}
+
+.codrive-banner p,
+.subsection-heading p,
+.section-note {
+  margin: 4px 0 0;
+  color: #7b8495;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.inline-business-section,
+.employee-section,
+.codrive-detail {
+  margin-top: 24px;
+  padding-top: 22px;
+  border-top: 1px solid #edf0f4;
+}
+
+.subsection-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.subsection-heading h2 {
+  margin: 2px 0 0;
+  font-size: 20px;
+}
+
+.business-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  gap: 14px;
+}
+
+.work-order-card,
+.action-card,
+.codrive-card {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid #dfe5ed;
+  border-radius: 16px;
+  background: white;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.work-order-card > p,
+.codrive-card > p {
+  color: #657084;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.action-diff pre {
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: #f7f9fb;
+  border-radius: 10px;
+  padding: 10px;
+  font-size: 11px;
+}
+
+.action-diff > span {
+  display: block;
+  color: #7b8495;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.employee-workspace {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 26px;
+  background: white;
+  border: 1px solid #e2e7ef;
+  border-radius: 18px;
+  box-shadow: 0 12px 35px rgba(33, 45, 66, 0.06);
+}
+
+.codrive-detail {
+  padding: 20px;
+  border: 1px solid #dfe5ed;
+  border-radius: 16px;
+  background: #fbfcfd;
+}
+
+.handoff-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px;
+}
+
+.handoff-messages {
+  max-height: 430px;
+  overflow: auto;
+  padding: 18px 0;
+}
+
+.message.staff .message-role {
+  background: #7452a8;
+}
+
+.message.staff p {
+  background: #f0eafb;
+}
+
+.staff-reply-form,
+.return-ai-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.staff-reply-form textarea,
+.return-ai-form textarea {
+  border: 1px solid #d9e0e8;
+  border-radius: 10px;
+  padding: 11px;
+  resize: vertical;
+}
+
+.staff-reply-form button,
+.return-ai-form button,
+.action-card button,
+.codrive-card button,
+.codrive-banner button,
+.work-order-card button {
+  border: 1px solid #218069;
+  border-radius: 9px;
+  background: #218069;
+  color: white;
+  padding: 9px 13px;
+  font-weight: 700;
+}
+
+button.secondary,
+.action-card button.secondary,
+.codrive-card button.secondary,
+.codrive-banner button.secondary,
+.work-order-card button.secondary {
+  border-color: #d9e0e8;
+  background: #f7f9fb;
+  color: #455166;
+}
+
+button.danger,
+.work-order-card button.danger {
+  border-color: #efb8b8;
+  background: #fff5f5;
+  color: #bd3e3e;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 @media (max-width: 960px) {
   .chat-layout,
   .platform-layout {
@@ -1560,6 +1750,13 @@ main {
   }
 
   .management-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .business-grid,
+  .handoff-facts,
+  .staff-reply-form,
+  .return-ai-form {
     grid-template-columns: 1fr;
   }
 

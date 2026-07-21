@@ -44,7 +44,7 @@ class AgentConfigTests(unittest.TestCase):
         values.update(changes)
         return values
 
-    def test_migration_six_initializes_three_agent_drafts(self):
+    def test_migrations_initialize_three_agent_drafts_and_preset_tools(self):
         agents = db.list_agent_configs()
         self.assertEqual(
             [item["id"] for item in agents],
@@ -55,9 +55,9 @@ class AgentConfigTests(unittest.TestCase):
                 row["version"]
                 for row in conn.execute("SELECT version FROM schema_migrations")
             }
-        self.assertIn(6, versions)
+        self.assertTrue({6, 7, 8, 9}.issubset(versions))
         self.assertTrue(all("mcp_tool_bindings" in item for item in agents))
-        self.assertTrue(all(item["available_preset_tools"] == [] for item in agents))
+        self.assertTrue(all(len(item["available_preset_tools"]) == 6 for item in agents))
 
     def test_agent_draft_is_binding_authority_and_does_not_change_active_release(self):
         skill = db.validate_skill(db.save_skill(SKILL)["id"])
@@ -214,6 +214,28 @@ class AgentConfigTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             db.delete_agent_config("general-service")
+
+    def test_preset_tools_are_bound_in_agent_and_frozen_in_release(self):
+        agent = db.get_agent_config("work-order-service")
+        saved = db.save_agent_config(
+            agent["id"],
+            self.payload(
+                agent,
+                tool_ids=["list_work_orders", "get_work_order", "create_work_order"],
+            ),
+        )
+        self.assertEqual(len(saved["bindings"]["preset_tools"]), 3)
+        candidate = db.create_candidate(
+            "V0.5.13-preset-tools", "预置工单 Tool 由 Agent 装配并随 Release 固定"
+        )
+        tools = db.get_release(candidate["id"])["config"]["tools"]
+        self.assertEqual(
+            [item["tool_id"] for item in tools],
+            ["list_work_orders", "get_work_order", "create_work_order"],
+        )
+        self.assertTrue(
+            all(item["agent_ids"] == ["work-order-service"] for item in tools)
+        )
 
 
 if __name__ == "__main__":

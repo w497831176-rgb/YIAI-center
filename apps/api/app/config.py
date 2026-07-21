@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 
 
-PRODUCT_VERSION = "V0.5.9"
+PRODUCT_VERSION = "V0.5.13"
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ class Settings:
     def validate_model_policy(self) -> None:
         if self.default_model != "deepseek-v4-flash":
             raise RuntimeError(
-                "V0.5.6-V0.5.9 only permits deepseek-v4-flash for ordinary runs"
+                "V0.5.6-V0.5.13 only permits deepseek-v4-flash for ordinary runs"
             )
         if self.thinking_effort not in {"high", "max"}:
             raise RuntimeError("DeepSeek thinking effort must be high or max")

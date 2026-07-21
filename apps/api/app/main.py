@@ -4,12 +4,13 @@ import json
 import mimetypes
 import re
 import sqlite3
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import db, mcp_runtime, rag
+from . import action_gateway, codrive, db, mcp_runtime, rag, work_orders
 from .config import PRODUCT_VERSION, settings
 from .git_skill_import import GitSkillImportError, import_public_github_skill
 from .mcp_client import StreamableHttpMcpClient, test_connection
@@ -20,7 +21,7 @@ STATIC_ROOT = Path(__file__).resolve().parent.parent / "static"
 
 
 class YIAIHandler(BaseHTTPRequestHandler):
-    server_version = "YIAI-Center/0.5.9"
+    server_version = "YIAI-Center/0.5.13"
 
     def log_message(self, format_string: str, *args) -> None:
         print(
@@ -111,6 +112,28 @@ class YIAIHandler(BaseHTTPRequestHandler):
                 self._send_json(rag.list_documents())
             elif path == "/api/mcp/servers":
                 self._send_json(db.list_mcp_servers())
+            elif path == "/api/work-orders":
+                query = parse_qs(parsed.query)
+                scope = str(query.get("scope", ["USER"])[0]).upper()
+                status = query.get("status", [None])[0]
+                self._send_json(work_orders.list_orders(scope=scope, status=status))
+            elif path == "/api/actions":
+                query = parse_qs(parsed.query)
+                conversation_id = query.get("conversation_id", [None])[0]
+                pending_only = str(query.get("pending_only", ["false"])[0]).lower() == "true"
+                self._send_json(
+                    action_gateway.list_actions(
+                        conversation_id=conversation_id, pending_only=pending_only
+                    )
+                )
+            elif path == "/api/codrive/sessions":
+                query = parse_qs(parsed.query)
+                include_ai_active = str(
+                    query.get("include_ai_active", ["true"])[0]
+                ).lower() == "true"
+                self._send_json(
+                    codrive.list_sessions(include_ai_active=include_ai_active)
+                )
             elif path == "/api/runs":
                 query = parse_qs(parsed.query)
                 limit = max(1, min(200, int(query.get("limit", ["50"])[0])))
@@ -149,6 +172,18 @@ class YIAIHandler(BaseHTTPRequestHandler):
                     self._send_json(db.get_mcp_server(server_id))
                 except KeyError:
                     self._send_json({"detail": "MCP Server not found"}, 404)
+            elif re.fullmatch(r"/api/work-orders/[^/]+", path):
+                work_order_id = path.removeprefix("/api/work-orders/")
+                try:
+                    self._send_json(work_orders.get_order(work_order_id))
+                except KeyError:
+                    self._send_json({"detail": "Work order not found"}, 404)
+            elif re.fullmatch(r"/api/actions/[^/]+", path):
+                action_id = path.removeprefix("/api/actions/")
+                try:
+                    self._send_json(action_gateway.get_action(action_id))
+                except KeyError:
+                    self._send_json({"detail": "Action not found"}, 404)
             elif re.fullmatch(r"/api/releases/[^/]+", path):
                 release_id = path.removeprefix("/api/releases/")
                 try:
@@ -160,6 +195,14 @@ class YIAIHandler(BaseHTTPRequestHandler):
                     "/messages"
                 )
                 self._send_json(db.get_messages(conversation_id))
+            elif path.startswith("/api/conversations/") and path.endswith("/codrive"):
+                conversation_id = path.removeprefix("/api/conversations/").removesuffix(
+                    "/codrive"
+                )
+                try:
+                    self._send_json(codrive.get_session(conversation_id))
+                except KeyError:
+                    self._send_json({"detail": "Conversation not found"}, 404)
             elif not path.startswith("/api/"):
                 self._serve_static(path)
             else:
@@ -175,7 +218,76 @@ class YIAIHandler(BaseHTTPRequestHandler):
         if path == "/api/chat/stream":
             self._chat_stream()
             return
+        if re.fullmatch(r"/api/conversations/[^/]+/codrive/return-ai/stream", path):
+            self._codrive_return_stream(path)
+            return
         try:
+            if path == "/api/actions/drafts":
+                payload = self._read_json()
+                release_id = str(payload.get("release_id", "")).strip()
+                if not release_id:
+                    release_id = db.get_workspace()["active_release_id"]
+                self._send_json(
+                    action_gateway.create_draft(
+                        tool_name=str(payload.get("tool_name", "")).strip(),
+                        payload=payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
+                        release_id=release_id,
+                        idempotency_key=str(payload.get("idempotency_key", "")).strip(),
+                        conversation_id=str(payload.get("conversation_id", "")).strip() or None,
+                        actor=str(payload.get("actor", "USER")),
+                    ),
+                    201,
+                )
+                return
+            action_match = re.fullmatch(r"/api/actions/([^/]+)/(confirm|cancel)", path)
+            if action_match:
+                action_id, operation = action_match.groups()
+                payload = self._read_json()
+                try:
+                    self._send_json(self._run_action_operation(action_id, operation, payload))
+                except KeyError:
+                    self._send_json({"detail": "Action not found"}, 404)
+                except PermissionError as exc:
+                    self._send_json({"detail": str(exc)}, 403)
+                except RuntimeError as exc:
+                    self._send_json({"detail": str(exc)}, 409)
+                except ValueError as exc:
+                    self._send_json({"detail": str(exc)}, 409)
+                return
+            codrive_match = re.fullmatch(
+                r"/api/conversations/([^/]+)/codrive/(request|accept|messages)", path
+            )
+            if codrive_match:
+                conversation_id, operation = codrive_match.groups()
+                payload = self._read_json()
+                try:
+                    if operation == "request":
+                        result = codrive.request_human(
+                            conversation_id,
+                            actor=str(payload.get("actor", "USER")),
+                            reason=str(payload.get("reason", "")),
+                            summary=str(payload.get("summary", "")),
+                            expected_version=payload.get("expected_version"),
+                        )
+                    elif operation == "accept":
+                        result = codrive.accept_handoff(
+                            conversation_id,
+                            expected_version=payload.get("expected_version"),
+                        )
+                    else:
+                        result = codrive.add_staff_message(
+                            conversation_id,
+                            str(payload.get("content", "")),
+                            expected_version=int(payload.get("expected_version", 0)),
+                        )
+                    self._send_json(result)
+                except KeyError:
+                    self._send_json({"detail": "Conversation not found"}, 404)
+                except RuntimeError as exc:
+                    self._send_json({"detail": str(exc)}, 409)
+                except ValueError as exc:
+                    self._send_json({"detail": str(exc)}, 409)
+                return
             if path == "/api/agents":
                 try:
                     self._send_json(db.create_agent_config(self._read_json()), 201)
@@ -412,6 +524,245 @@ class YIAIHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             print(f"PUT {path} failed: {type(exc).__name__}", flush=True)
             self._send_json({"detail": "Internal error"}, 500)
+
+    def _run_action_operation(
+        self, action_id: str, operation: str, payload: dict
+    ) -> dict:
+        action_before = action_gateway.get_action(action_id, include_audit=False)
+        description = (
+            f"确认执行 {action_before['tool_name']}"
+            if operation == "confirm"
+            else f"取消 {action_before['tool_name']}"
+        )
+        run = db.prepare_run(
+            action_before.get("conversation_id"),
+            f"【工单操作】{description}，操作编号 {action_id}",
+            release_id_override=action_before["release_id"],
+        )
+        if not action_before.get("conversation_id"):
+            with db.connection() as conn:
+                conn.execute(
+                    "UPDATE action_requests SET conversation_id=? WHERE id=?",
+                    (run["conversation_id"], action_id),
+                )
+        started = time.perf_counter()
+        db.append_trace(
+            run["run_id"],
+            run["release_id"],
+            "run_started",
+            {"conversation_id": run["conversation_id"], "source": "action_gateway"},
+        )
+        db.append_trace(
+            run["run_id"],
+            run["release_id"],
+            "user_message_received",
+            {
+                "message_id": run["user_message_id"],
+                "role": "user",
+                "content": run["content"],
+            },
+        )
+        db.append_trace(
+            run["run_id"],
+            run["release_id"],
+            "release_pinned",
+            {"release_id": run["release_id"], "release_version": run["release_version"]},
+        )
+        released_tool = next(
+            (
+                item
+                for item in run["release_config"].get("tools", [])
+                if item.get("tool_id") == action_before["tool_name"]
+            ),
+            None,
+        )
+        if released_tool is None or not released_tool.get("agent_ids"):
+            db.fail_run(run["run_id"], "TOOL_NOT_IN_RELEASE")
+            db.append_trace(
+                run["run_id"],
+                run["release_id"],
+                "error",
+                {"error_code": "TOOL_NOT_IN_RELEASE", "action_id": action_id},
+            )
+            raise ValueError("该操作的 Release 快照中没有绑定此 Tool")
+        agent_id = str(released_tool["agent_ids"][0])
+        agent = next(
+            item
+            for item in run["release_config"]["agents"]
+            if item["id"] == agent_id
+        )
+        db.append_trace(
+            run["run_id"],
+            run["release_id"],
+            "agent_selected",
+            {"agent_id": agent_id, "agent_name": agent["name"], "source": "action_release_binding"},
+        )
+        db.append_trace(
+            run["run_id"],
+            run["release_id"],
+            "action_confirmation_received" if operation == "confirm" else "action_cancel_received",
+            {
+                "action_id": action_id,
+                "tool_name": action_before["tool_name"],
+                "action_version": action_before["version"],
+                "confirmation_step": action_before["confirmation_step"],
+                "required_confirmations": action_before["required_confirmations"],
+            },
+        )
+        if operation == "confirm":
+            action = action_gateway.confirm_action(
+                action_id,
+                confirmation_token=str(payload.get("confirmation_token", "")),
+                expected_version=payload.get("expected_version"),
+                confirmation_run_id=run["run_id"],
+                actor="USER",
+            )
+        else:
+            action = action_gateway.cancel_action(
+                action_id,
+                expected_version=payload.get("expected_version"),
+                actor="USER",
+            )
+        if action["status"] == "SUCCEEDED":
+            receipt = action.get("receipt") or {}
+            answer = (
+                f"{receipt.get('message', '操作已成功执行。')}"
+                f"工单编号：{receipt.get('work_order_id', '—')}。"
+            )
+        elif action["status"] == "AWAITING_CONFIRMATION":
+            answer = (
+                f"第 {action['confirmation_step']} 次确认已记录；"
+                f"还需要 {action['remaining_confirmations']} 次确认，当前仍未执行写操作。"
+            )
+        elif action["status"] == "CANCELLED":
+            answer = "操作已取消，工单数据没有发生变化。"
+        else:
+            answer = (action.get("receipt") or {}).get("message") or "操作未成功执行。"
+        latency_ms = round((time.perf_counter() - started) * 1000)
+        result = db.finish_run(
+            run["run_id"],
+            run["release_id"],
+            run["conversation_id"],
+            agent_id,
+            answer,
+            latency_ms,
+        )
+        db.append_trace(
+            run["run_id"],
+            run["release_id"],
+            "action_gateway_completed",
+            {
+                "action_id": action_id,
+                "tool_name": action["tool_name"],
+                "status": action["status"],
+                "payload": action["payload"],
+                "before": action["before"],
+                "result": action["result"],
+                "receipt": action["receipt"],
+                "model_api_cost": 0,
+            },
+        )
+        db.append_trace(
+            run["run_id"],
+            run["release_id"],
+            "assistant_response_completed",
+            {
+                "message_id": result["message_id"],
+                "role": "assistant",
+                "agent_id": agent_id,
+                "agent_name": agent["name"],
+                "content": answer,
+            },
+        )
+        done = {
+            "run_id": run["run_id"],
+            "status": "DONE",
+            "agent_id": agent_id,
+            "agent_name": agent["name"],
+            "release_id": run["release_id"],
+            "release_version": run["release_version"],
+            "latency_ms": latency_ms,
+            "estimated_cost": result["estimated_cost"],
+            "estimated_cost_cny": result["estimated_cost_cny"],
+            "display_currency": "CNY",
+            "action_id": action_id,
+            "action_status": action["status"],
+        }
+        db.append_trace(run["run_id"], run["release_id"], "done", done)
+        return {"action": action, "run": done, "message": answer}
+
+    def _codrive_return_stream(self, path: str) -> None:
+        conversation_id = path.removeprefix("/api/conversations/").removesuffix(
+            "/codrive/return-ai/stream"
+        )
+        try:
+            payload = self._read_json()
+            session = codrive.begin_return_to_ai(
+                conversation_id,
+                summary=str(payload.get("summary", "")),
+                expected_version=int(payload.get("expected_version", 0)),
+            )
+        except KeyError:
+            self._send_json({"detail": "Conversation not found"}, 404)
+            return
+        except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
+            self._send_json({"detail": str(exc) or "Invalid request"}, 409)
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        connected = True
+        run_id = None
+        success = False
+        continuation = (
+            "【人机共驾交还】员工已完成当前人工处置并将对话交还 AI。"
+            "请读取最近的员工回复、用户消息和处置摘要，继续承接；这不是会话完结，"
+            "回答后继续保持待命。"
+        )
+        if session.get("handoff_summary"):
+            continuation += f"\n处置摘要：{session['handoff_summary']}"
+        try:
+            for chunk in execute_chat(
+                conversation_id, continuation, resume_from_human=True
+            ):
+                lines = chunk.splitlines()
+                event_name = next(
+                    (line[7:] for line in lines if line.startswith("event: ")), ""
+                )
+                data_line = next(
+                    (line[6:] for line in lines if line.startswith("data: ")), ""
+                )
+                if data_line:
+                    data = json.loads(data_line)
+                    if event_name == "run_started":
+                        run_id = data.get("run_id")
+                    elif event_name == "done":
+                        success = True
+                    elif event_name == "error":
+                        success = False
+                if connected:
+                    try:
+                        self.wfile.write(chunk.encode("utf-8"))
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        connected = False
+        except Exception as exc:
+            print(f"codrive return stream failed: {type(exc).__name__}", flush=True)
+        finally:
+            restored = codrive.complete_return_to_ai(
+                conversation_id, run_id=run_id, success=success
+            )
+            if connected:
+                try:
+                    self.wfile.write(sse("codrive", restored).encode("utf-8"))
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            self.close_connection = True
 
     def _chat_stream(self) -> None:
         try:

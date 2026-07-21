@@ -5,6 +5,15 @@ const state = {
   messages: [],
   conversations: [],
   conversationId: localStorage.getItem("yiai-conversation-id"),
+  userWorkOrders: [],
+  employeeWorkOrders: [],
+  actions: [],
+  employeeActions: [],
+  actionTokens: JSON.parse(localStorage.getItem("yiai-action-tokens") || "{}"),
+  codriveSession: null,
+  codriveSessions: [],
+  selectedCodrive: null,
+  employeeConversationMessages: [],
   sending: false,
   streamTerminal: null,
   run: null,
@@ -121,6 +130,58 @@ function cardIcon(label, tone = "green") {
 function shortText(value, maximum = 120) {
   const text = String(value || "");
   return text.length > maximum ? `${text.slice(0, maximum)}…` : text;
+}
+
+function persistActionToken(action) {
+  if (action?.confirmation_token) {
+    state.actionTokens[action.id] = action.confirmation_token;
+  } else if (action && action.status !== "AWAITING_CONFIRMATION") {
+    delete state.actionTokens[action.id];
+  }
+  localStorage.setItem("yiai-action-tokens", JSON.stringify(state.actionTokens));
+}
+
+function workOrderStatus(value) {
+  return ({ OPEN: "待处理", IN_PROGRESS: "处理中", CLOSED: "已关闭" })[value] || value;
+}
+
+function workOrderCard(order, employee = false) {
+  return `<article class="work-order-card">
+    <div class="management-card-top">${cardIcon("W", order.status === "CLOSED" ? "green" : "amber")}<span class="status ${order.status === "CLOSED" ? "done" : "running"}">${escapeHtml(workOrderStatus(order.status))}</span></div>
+    <div class="management-card-title"><h3>${escapeHtml(order.subject)}</h3><small>${escapeHtml(order.id)}</small></div>
+    <p>${escapeHtml(order.description)}</p>
+    <div class="management-card-meta"><span>类别 / 优先级</span><strong>${escapeHtml(order.category)} / ${escapeHtml(order.priority)}</strong><span>处理结果</span><strong>${escapeHtml(order.result || "暂无")}</strong><span>更新时间</span><strong>${formatTime(order.updated_at)}</strong></div>
+    ${employee && order.status !== "CLOSED" ? `<div class="card-actions"><button class="secondary" data-work-order-action="update" data-work-order-id="${escapeHtml(order.id)}">更新草稿</button><button class="secondary" data-work-order-action="close" data-work-order-id="${escapeHtml(order.id)}">关闭草稿</button><button class="danger" data-work-order-action="delete" data-work-order-id="${escapeHtml(order.id)}">删除草稿</button></div>` : ""}
+  </article>`;
+}
+
+function actionCard(action) {
+  const hasToken = Boolean(state.actionTokens[action.id]);
+  const confirmLabel = action.tool_name === "delete_work_order"
+    ? (action.confirmation_step === 0 ? "第一次确认删除" : "第二次确认并软删除")
+    : "确认执行";
+  return `<article class="action-card">
+    <div class="management-card-top">${cardIcon("✓", action.status === "SUCCEEDED" ? "green" : action.status === "FAILED" ? "red" : "orange")}<span class="status ${action.status.toLowerCase()}">${escapeHtml(action.status)}</span></div>
+    <div class="management-card-title"><h3>${escapeHtml(action.tool_name)}</h3><small>${escapeHtml(action.id)}</small></div>
+    <div class="action-diff"><span>执行参数</span><pre>${escapeHtml(JSON.stringify(action.payload, null, 2))}</pre>${action.before ? `<span>执行前快照</span><pre>${escapeHtml(JSON.stringify(action.before, null, 2))}</pre>` : ""}</div>
+    ${action.receipt ? `<div class="notice">${escapeHtml(action.receipt.message)} ${escapeHtml(action.receipt.work_order_id || "")}</div>` : ""}
+    ${action.status === "AWAITING_CONFIRMATION" ? `<p class="section-note">还需确认 ${action.remaining_confirmations} 次。确认令牌只保存在当前浏览器，不进入 Trace 或文档。</p><div class="card-actions"><button data-action-confirm="${escapeHtml(action.id)}" data-action-version="${action.version}" ${hasToken ? "" : "disabled"}>${confirmLabel}</button><button class="secondary" data-action-cancel="${escapeHtml(action.id)}" data-action-version="${action.version}">取消</button></div>${hasToken ? "" : `<p class="validation-errors">当前浏览器没有该草稿的一次性令牌，请取消后重新生成。</p>`}` : ""}
+  </article>`;
+}
+
+function codriveBanner() {
+  const session = state.codriveSession;
+  if (!state.conversationId) return `<div class="codrive-banner"><div><strong>人机共驾</strong><p>开始一段对话后，可以随时邀请员工协助。</p></div></div>`;
+  if (!session || session.state === "AI_ACTIVE") {
+    return `<div class="codrive-banner ai-active"><div><strong>AI 承接中 · 持续待命</strong><p>可以反复进入人机共驾；这里没有“完结”状态。</p></div><button class="secondary" data-action="request-human">邀请员工协助</button></div>`;
+  }
+  if (session.state === "HANDOFF_REQUESTED") {
+    return `<div class="codrive-banner waiting"><div><strong>等待员工接受</strong><p>AI 保持待命，不与员工并发输出；你仍可以继续补充消息。</p></div></div>`;
+  }
+  if (session.state === "HUMAN_ACTIVE") {
+    return `<div class="codrive-banner human-active"><div><strong>员工协同中</strong><p>AI 保持待命。只有员工点击“交还 AI”后，AI 才重新承接。</p></div></div>`;
+  }
+  return `<div class="codrive-banner waiting"><div><strong>正在交还 AI</strong><p>AI 正读取人工回复和处置摘要，恢复后继续待命。</p></div></div>`;
 }
 
 function shell(content) {
@@ -241,7 +302,9 @@ function userPage() {
         </div>
         <button class="ghost-button" data-action="new-conversation">新对话</button>
       </div>
+      ${codriveBanner()}
       <div class="message-list">${messageList()}</div>
+      ${state.actions.length ? `<section class="inline-business-section"><div class="subsection-heading"><div><span class="eyebrow">CONFIRM BEFORE WRITE</span><h2>待确认操作</h2></div></div><div class="business-grid">${state.actions.map(actionCard).join("")}</div></section>` : ""}
       <form class="composer" id="chat-form">
         <textarea id="chat-input" placeholder="输入你的问题…" rows="2" ${
           state.sending ? "disabled" : ""
@@ -249,19 +312,37 @@ function userPage() {
         <button ${state.sending ? "disabled" : ""}>${state.sending ? "运行中" : "发送"}</button>
       </form>
       <p class="privacy-note">隐藏思考内容不展示、不保存；Run 详情只展示可核对的输入、输出和运行事实。</p>
+      <section class="inline-business-section"><div class="subsection-heading"><div><span class="eyebrow">MY WORK ORDERS</span><h2>我的工单</h2><p>固定演示用户仅查看自己的未删除工单。</p></div></div><div class="business-grid">${state.userWorkOrders.length ? state.userWorkOrders.map((item) => workOrderCard(item)).join("") : `<div class="run-empty">当前没有可见工单。</div>`}</div></section>
     </div>
   </section>`;
 }
 
 function employeePage() {
-  return `<section class="placeholder-page">
-    <span class="eyebrow">HUMAN COLLABORATION</span>
-    <h1>员工工作台</h1>
-    <p>人机共驾和工单处理将在后续版本接入真实状态与 Tool。</p>
-    <div class="scope-card">
-      <strong>当前版本诚实边界</strong>
-      <p>V0.5.6 已完成自然语言 Skill；员工队列、工单结果和人工接管仍不使用假数据占位。</p>
-    </div>
+  const selected = state.selectedCodrive;
+  return `<section class="employee-workspace">
+    ${panelHeading("HUMAN + AI CO-DRIVING", "员工工作台", "员工可持续多轮回复；点击“交还 AI”后 AI 恢复承接，但会话不会完结。")}
+    ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
+    <section class="employee-section">
+      <div class="subsection-heading"><div><h2>人机共驾</h2><p>不建设排队、抢单或坐席系统；同一时刻只允许一方输出。</p></div></div>
+      <div class="business-grid codrive-grid">${state.codriveSessions.length ? state.codriveSessions.map((session) => `<article class="codrive-card">
+        <div class="management-card-top">${cardIcon("协", session.state === "HUMAN_ACTIVE" ? "purple" : session.state === "AI_ACTIVE" ? "green" : "amber")}<span class="status ${session.state.toLowerCase()}">${escapeHtml(session.state)}</span></div>
+        <div class="management-card-title"><h3>${escapeHtml(shortText(session.title || "未命名对话", 42))}</h3><small>${escapeHtml(session.conversation_id)}</small></div>
+        <p>${escapeHtml(session.request_reason || "AI 已承接并持续待命")}</p>
+        <div class="management-card-meta"><span>员工消息</span><strong>${session.staff_message_count || 0} 条</strong><span>最近 Agent</span><strong>${escapeHtml(agentName(session.last_agent_id))}</strong><span>更新时间</span><strong>${formatTime(session.updated_at)}</strong></div>
+        <div class="card-actions"><button class="secondary" data-codrive-open="${escapeHtml(session.conversation_id)}">查看交接包</button>${session.state === "HANDOFF_REQUESTED" ? `<button data-codrive-accept="${escapeHtml(session.conversation_id)}" data-codrive-version="${session.version}">接受协同</button>` : ""}</div>
+      </article>`).join("") : `<div class="run-empty">当前没有人机共驾记录。</div>`}</div>
+    </section>
+    ${selected ? `<section class="codrive-detail">
+      <div class="subsection-heading"><div><h2>交接包</h2><p>${escapeHtml(selected.conversation_id)} · ${escapeHtml(selected.state)}</p></div><button class="secondary" data-action="close-codrive-detail">收起</button></div>
+      <div class="handoff-facts">${fact("请求方", selected.requested_by || "—")}${fact("请求原因", selected.request_reason || "—")}${fact("处置摘要", selected.handoff_summary || "暂无")}${fact("AI 状态", "始终待命")}</div>
+      <div class="handoff-messages">${state.employeeConversationMessages.map((message) => `<article class="message ${message.role}"><span class="message-role">${message.role === "staff" ? "员工" : message.role === "user" ? "用户" : "AI"}</span><div class="message-body"><p>${escapeHtml(message.content)}</p><div class="bubble-meta"><time>${formatTime(message.created_at)}</time></div></div></article>`).join("")}</div>
+      ${selected.state === "HUMAN_ACTIVE" ? `<form class="staff-reply-form" id="staff-reply-form" data-conversation-id="${escapeHtml(selected.conversation_id)}" data-version="${selected.version}"><textarea name="content" rows="3" placeholder="员工可以连续回复多轮…" required></textarea><button>发送员工回复</button></form><form class="return-ai-form" id="return-ai-form" data-conversation-id="${escapeHtml(selected.conversation_id)}" data-version="${selected.version}"><textarea name="summary" rows="2" placeholder="处置摘要（可选，AI 会同时读取完整人工消息）"></textarea><button>交还 AI</button></form><p class="section-note">没有“结束会话”按钮。交还后 AI 恢复承接并继续待命，之后仍可再次进入人机共驾。</p>` : ""}
+    </section>` : ""}
+    <section class="employee-section">
+      <div class="subsection-heading"><div><h2>全部演示工单</h2><p>更新、关闭和删除只生成确认草稿；删除需要两次确认并采用软删除。</p></div></div>
+      <div class="business-grid">${state.employeeWorkOrders.length ? state.employeeWorkOrders.map((item) => workOrderCard(item, true)).join("") : `<div class="run-empty">当前没有工单。</div>`}</div>
+    </section>
+    ${state.employeeActions.length ? `<section class="employee-section"><div class="subsection-heading"><div><h2>工单操作与回执</h2><p>所有写操作统一进入 Action Gateway。</p></div></div><div class="business-grid">${state.employeeActions.map(actionCard).join("")}</div></section>` : ""}
   </section>`;
 }
 
@@ -317,6 +398,8 @@ function releaseDiff() {
       ${fact("移除 MCP Server", (diff.mcp_removed || []).join("、") || "无")}
       ${fact("配置变更 MCP Server", (diff.mcp_changed || []).join("、") || "无")}
       ${fact("未变化 MCP Server", (diff.mcp_unchanged || []).join("、") || "无")}
+      ${fact("新增预置 Tool", (diff.tools_added || []).join("、") || "无")}
+      ${fact("移除预置 Tool", (diff.tools_removed || []).join("、") || "无")}
     </div>
     <details><summary>查看候选 Release 的 Agent 绑定快照</summary><pre>${escapeHtml(JSON.stringify(diff.agent_binding_snapshot || {}, null, 2))}</pre></details>
   </section>`;
@@ -359,7 +442,7 @@ function agentPanel() {
         ${connectedMcp.length ? connectedMcp.map((server) => `<div class="binding-server"><strong>${escapeHtml(server.name)}</strong><small>${escapeHtml(server.endpoint)}</small>${(server.allowed_tools || []).map((toolName) => { const key = `${server.id}::${toolName}`; return `<label><input type="checkbox" name="mcp_tool_bindings" value="${escapeHtml(key)}" ${mcpBindings.has(key) ? "checked" : ""} /> ${escapeHtml(toolName)}</label>`; }).join("") || `<div class="run-empty">没有可绑定的只读 Tool。</div>`}</div>`).join("") : `<div class="run-empty">暂无已连接的远程 MCP Server。</div>`}
       </fieldset>
       <fieldset class="full binding-group"><legend>预置 Tool</legend>
-        ${presetTools.length ? presetTools.map((tool) => `<label><input type="checkbox" name="tool_ids" value="${escapeHtml(tool.id)}" ${toolIds.has(tool.id) ? "checked" : ""} /> ${escapeHtml(tool.name)}</label>`).join("") : `<div class="run-empty">当前版本没有已登记的预置 Tool，不使用占位 Tool 冒充真实能力。</div>`}
+        ${presetTools.length ? presetTools.map((tool) => `<label><input type="checkbox" name="tool_ids" value="${escapeHtml(tool.id)}" ${toolIds.has(tool.id) ? "checked" : ""} /> <strong>${escapeHtml(tool.name)}</strong><small>${tool.read_only ? "只读" : "写操作 · 必须确认"} · ${escapeHtml(tool.id)}</small></label>`).join("") : `<div class="run-empty">当前版本没有已登记的预置 Tool，不使用占位 Tool 冒充真实能力。</div>`}
       </fieldset>
       <div class="form-actions full"><button>保存 Agent 草稿</button></div>
     </form>`, "close-agent-editor", true) : ""}
@@ -372,6 +455,7 @@ function agentCard(agent) {
     ...(bindings.skills || []).map((item) => item.name),
     ...(bindings.rag_documents || []).map((item) => item.name),
     ...(bindings.mcp_tools || []).map((item) => `${item.server_name} / ${item.tool_name}`),
+    ...(bindings.preset_tools || []).map((item) => item.name),
   ];
   return `<article class="management-card agent-management-card">
     <div class="management-card-top">${cardIcon("A", "purple")}<span class="status draft">配置草稿</span></div>
@@ -556,6 +640,17 @@ const eventLabels = {
   mcp_request: "MCP 请求",
   mcp_response: "MCP 响应",
   mcp_binding_rejected: "MCP 绑定拒绝",
+  preset_tool_selected: "选择预置 Tool",
+  preset_tool_request: "预置 Tool 请求",
+  preset_tool_response: "预置 Tool 响应",
+  action_draft_information_incomplete: "工单草稿信息检查",
+  action_draft_created: "创建工单操作草稿",
+  action_confirmation_received: "收到操作确认",
+  action_cancel_received: "收到操作取消",
+  action_gateway_completed: "Action Gateway 回执",
+  codrive_handoff_requested: "发起人机共驾",
+  codrive_ai_suppressed: "员工持有输出权，AI 待命",
+  cloud_call_failed: "云 API 调用失败并降级",
   assistant_response_completed: "客服回答完成",
   done: "Run 完成",
   error: "Run 失败",
@@ -784,6 +879,8 @@ function startNewConversation() {
   state.messages = [];
   state.run = null;
   state.drawerRun = null;
+  state.actions = [];
+  state.codriveSession = null;
   render();
 }
 
@@ -791,6 +888,7 @@ async function selectConversation(conversationId) {
   state.conversationId = conversationId;
   localStorage.setItem("yiai-conversation-id", conversationId);
   state.messages = await api(`/api/conversations/${conversationId}/messages`);
+  await loadUserData();
   state.drawerRun = null;
   render();
 }
@@ -805,7 +903,11 @@ function bindEvents() {
     button.addEventListener("click", async () => {
       state.tab = button.dataset.tab;
       if (state.tab === "platform") await loadPlatform();
-      if (state.tab === "user") await loadConversations();
+      if (state.tab === "user") {
+        await loadConversations();
+        await loadUserData();
+      }
+      if (state.tab === "employee") await loadEmployeeData();
       render();
     });
   });
@@ -838,6 +940,29 @@ function bindEvents() {
     }
   });
   document.querySelector("#chat-form")?.addEventListener("submit", sendChat);
+  document.querySelector("[data-action='request-human']")?.addEventListener("click", requestHuman);
+  document.querySelectorAll("[data-action-confirm]").forEach((button) => {
+    button.addEventListener("click", () => performAction(button.dataset.actionConfirm, "confirm", Number(button.dataset.actionVersion)));
+  });
+  document.querySelectorAll("[data-action-cancel]").forEach((button) => {
+    button.addEventListener("click", () => performAction(button.dataset.actionCancel, "cancel", Number(button.dataset.actionVersion)));
+  });
+  document.querySelectorAll("[data-codrive-open]").forEach((button) => {
+    button.addEventListener("click", () => openCodrive(button.dataset.codriveOpen));
+  });
+  document.querySelectorAll("[data-codrive-accept]").forEach((button) => {
+    button.addEventListener("click", () => acceptCodrive(button.dataset.codriveAccept, Number(button.dataset.codriveVersion)));
+  });
+  document.querySelector("[data-action='close-codrive-detail']")?.addEventListener("click", () => {
+    state.selectedCodrive = null;
+    state.employeeConversationMessages = [];
+    render();
+  });
+  document.querySelector("#staff-reply-form")?.addEventListener("submit", sendStaffReply);
+  document.querySelector("#return-ai-form")?.addEventListener("submit", returnToAi);
+  document.querySelectorAll("[data-work-order-action]").forEach((button) => {
+    button.addEventListener("click", () => createEmployeeAction(button.dataset.workOrderId, button.dataset.workOrderAction));
+  });
 
   document.querySelectorAll("[data-platform-section]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -969,6 +1094,157 @@ function bindEvents() {
 
 async function loadConversations() {
   state.conversations = await api("/api/conversations");
+}
+
+async function loadUserData() {
+  state.userWorkOrders = await api("/api/work-orders?scope=USER");
+  if (!state.conversationId) {
+    state.actions = [];
+    state.codriveSession = null;
+    return;
+  }
+  [state.actions, state.codriveSession] = await Promise.all([
+    api(`/api/actions?conversation_id=${encodeURIComponent(state.conversationId)}`),
+    api(`/api/conversations/${encodeURIComponent(state.conversationId)}/codrive`),
+  ]);
+}
+
+async function loadEmployeeData() {
+  [state.employeeWorkOrders, state.codriveSessions, state.employeeActions] = await Promise.all([
+    api("/api/work-orders?scope=EMPLOYEE"),
+    api("/api/codrive/sessions?include_ai_active=true"),
+    api("/api/actions"),
+  ]);
+  if (state.selectedCodrive) {
+    await openCodrive(state.selectedCodrive.conversation_id, false);
+  }
+}
+
+async function requestHuman() {
+  if (!state.conversationId) return;
+  state.codriveSession = await api(`/api/conversations/${encodeURIComponent(state.conversationId)}/codrive/request`, {
+    method: "POST",
+    body: JSON.stringify({
+      actor: "USER",
+      reason: "用户在对话页面点击邀请员工协助",
+      summary: "请阅读完整对话、最近 Run 和未完成操作。",
+      expected_version: state.codriveSession?.version,
+    }),
+  });
+  state.notice = "已发起人机共驾；AI 保持待命，员工接受后可以持续多轮回复。";
+  render();
+}
+
+async function performAction(actionId, operation, version) {
+  const body = { expected_version: version };
+  if (operation === "confirm") body.confirmation_token = state.actionTokens[actionId] || "";
+  const response = await api(`/api/actions/${encodeURIComponent(actionId)}/${operation}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  persistActionToken(response.action);
+  state.notice = response.message;
+  if (state.tab === "user") {
+    if (state.conversationId) state.messages = await api(`/api/conversations/${state.conversationId}/messages`);
+    await loadUserData();
+    await loadConversations();
+  } else {
+    await loadEmployeeData();
+  }
+  render();
+}
+
+async function openCodrive(conversationId, rerender = true) {
+  [state.selectedCodrive, state.employeeConversationMessages] = await Promise.all([
+    api(`/api/conversations/${encodeURIComponent(conversationId)}/codrive`),
+    api(`/api/conversations/${encodeURIComponent(conversationId)}/messages`),
+  ]);
+  if (rerender) render();
+}
+
+async function acceptCodrive(conversationId, version) {
+  await api(`/api/conversations/${encodeURIComponent(conversationId)}/codrive/accept`, {
+    method: "POST",
+    body: JSON.stringify({ expected_version: version }),
+  });
+  state.notice = "员工已接受协同；现在可以连续回复多轮，AI 保持待命。";
+  await loadEmployeeData();
+  await openCodrive(conversationId, false);
+  render();
+}
+
+async function sendStaffReply(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const conversationId = event.currentTarget.dataset.conversationId;
+  await api(`/api/conversations/${encodeURIComponent(conversationId)}/codrive/messages`, {
+    method: "POST",
+    body: JSON.stringify({
+      content: form.get("content"),
+      expected_version: Number(event.currentTarget.dataset.version),
+    }),
+  });
+  state.notice = "员工回复已保存。可以继续回复，不受轮次限制。";
+  await loadEmployeeData();
+  await openCodrive(conversationId, false);
+  render();
+}
+
+async function returnToAi(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const conversationId = event.currentTarget.dataset.conversationId;
+  const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}/codrive/return-ai/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      summary: form.get("summary"),
+      expected_version: Number(event.currentTarget.dataset.version),
+    }),
+  });
+  if (!response.ok || !response.body) throw new Error(await response.text());
+  const reader = response.body.getReader();
+  while (!(await reader.read()).done) {}
+  state.notice = "已交还 AI。AI 已恢复承接并继续待命；之后仍可再次进入人机共驾。";
+  await loadEmployeeData();
+  await openCodrive(conversationId, false);
+  render();
+}
+
+async function createEmployeeAction(workOrderId, operation) {
+  const order = state.employeeWorkOrders.find((item) => item.id === workOrderId);
+  if (!order) return;
+  let toolName;
+  let payload;
+  if (operation === "update") {
+    const description = window.prompt("填写要更新的工单描述（只生成草稿，确认后才写入）", order.description);
+    if (description == null || !description.trim()) return;
+    toolName = "update_work_order";
+    payload = { work_order_id: workOrderId, changes: { description: description.trim() } };
+  } else if (operation === "close") {
+    const result = window.prompt("填写关闭处理结果（只生成草稿，确认后才写入）", order.result || "问题已处理");
+    if (result == null || !result.trim()) return;
+    toolName = "close_work_order";
+    payload = { work_order_id: workOrderId, result: result.trim() };
+  } else {
+    if (!window.confirm(`为工单 ${workOrderId} 生成软删除草稿吗？生成草稿不会删除，执行仍需两次确认。`)) return;
+    toolName = "delete_work_order";
+    payload = { work_order_id: workOrderId };
+  }
+  const action = await api("/api/actions/drafts", {
+    method: "POST",
+    body: JSON.stringify({
+      tool_name: toolName,
+      payload,
+      release_id: state.workspace.active_release_id,
+      idempotency_key: `employee-${toolName}-${workOrderId}-${Date.now()}`,
+      actor: "STAFF",
+    }),
+  });
+  persistActionToken(action);
+  state.notice = "操作草稿已生成，尚未写入。请在下方确认卡核对。";
+  await loadEmployeeData();
+  render();
 }
 
 async function loadPlatform() {
@@ -1302,6 +1578,7 @@ async function sendChat(event) {
         state.messages = await api(`/api/conversations/${state.conversationId}/messages`);
       }
       await loadConversations();
+      await loadUserData();
     }
     render();
   }
@@ -1330,6 +1607,10 @@ function handleSseBlock(block) {
     assistant.agent_name = data.agent_name;
   } else if (eventName === "delta") {
     assistant.content += data.content;
+  } else if (eventName === "action_pending") {
+    persistActionToken(data);
+  } else if (eventName === "codrive" || eventName === "human_active") {
+    state.codriveSession = data;
   } else if (eventName === "done") {
     state.streamTerminal = "done";
     state.run = { ...(state.run || {}), ...data };
@@ -1350,6 +1631,7 @@ async function boot() {
     if (state.conversationId) {
       state.messages = await api(`/api/conversations/${state.conversationId}/messages`);
     }
+    await loadUserData();
   } catch {
     state.notice = "后端暂不可用。";
   }

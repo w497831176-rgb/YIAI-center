@@ -5,7 +5,7 @@ import re
 import time
 from typing import Any, Iterator
 
-from . import db, mcp_runtime, rag
+from . import action_gateway, codrive, db, mcp_runtime, rag, work_orders
 from .deepseek import DeepSeekAdapter
 
 
@@ -17,21 +17,46 @@ def _route_terms(text: str) -> set[str]:
     return terms
 
 
-def deterministic_route(text: str, agents: list[dict[str, Any]]) -> dict[str, Any]:
+def _released_tool_profile(
+    release_config: dict[str, Any] | None, agent_id: str
+) -> str:
+    if not release_config:
+        return ""
+    blocks = []
+    for tool in release_config.get("tools", []):
+        if agent_id not in tool.get("agent_ids", []):
+            continue
+        blocks.append(
+            " ".join(
+                str(tool.get(key, ""))
+                for key in ("tool_id", "name", "description")
+            )
+        )
+    return " ".join(blocks)
+
+
+def deterministic_route(
+    text: str,
+    agents: list[dict[str, Any]],
+    release_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not agents:
         raise ValueError("Release does not contain an Agent")
     input_terms = _route_terms(text)
     ranked = []
     for index, item in enumerate(agents):
         profile = " ".join(
-            str(item.get(key, "")) for key in ("name", "description", "system_prompt")
+            [
+                *(str(item.get(key, "")) for key in ("name", "description", "system_prompt")),
+                _released_tool_profile(release_config, str(item.get("id", ""))),
+            ]
         )
         score = len(input_terms & _route_terms(profile))
         ranked.append((score, -index, item))
     score, _index, selected = max(ranked, key=lambda item: (item[0], item[1]))
     agent = str(selected["id"])
     reason = (
-        f"用户请求与该 Agent 的名称和业务说明匹配（得分 {score}）"
+        f"用户请求与该 Agent 的说明及已发布 Tool 能力匹配（得分 {score}）"
         if score
         else "模型 Router 不可用，按当前 Release 中的 Agent 顺序安全兜底"
     )
@@ -108,10 +133,94 @@ def skill_prompt(skills: list[dict[str, Any]]) -> str:
     return "\n\n以下是本 Release 已发布并绑定到你的自然语言 Skill，必须遵循：\n" + "\n\n".join(blocks)
 
 
+def _finish_deterministic(
+    run: dict[str, Any],
+    agent: dict[str, Any],
+    answer: str,
+    started: float,
+    *,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    latency_ms = round((time.perf_counter() - started) * 1000)
+    result = db.finish_run(
+        run["run_id"],
+        run["release_id"],
+        run["conversation_id"],
+        agent["id"],
+        answer,
+        latency_ms,
+    )
+    trace(
+        run,
+        "assistant_response_completed",
+        {
+            "message_id": result["message_id"],
+            "role": "assistant",
+            "agent_id": agent["id"],
+            "agent_name": agent["name"],
+            "content": answer,
+        },
+    )
+    payload = {
+        "run_id": run["run_id"],
+        "status": "DONE",
+        "agent_id": agent["id"],
+        "agent_name": agent["name"],
+        "release_id": run["release_id"],
+        "release_version": run["release_version"],
+        "latency_ms": latency_ms,
+        "estimated_cost": result["estimated_cost"],
+        "estimated_cost_cny": result["estimated_cost_cny"],
+        "display_currency": "CNY",
+        **(extra or {}),
+    }
+    trace(run, "done", payload)
+    return payload
+
+
+def _action_summary(action: dict[str, Any]) -> str:
+    tool_name = action["tool_name"]
+    payload = action["payload"]
+    before = action.get("before")
+    if tool_name == "create_work_order":
+        lines = [
+            "已生成创建工单草稿，尚未写入数据库：",
+            f"- 主题：{payload['subject']}",
+            f"- 描述：{payload['description']}",
+            f"- 类别：{payload['category']}",
+            f"- 优先级：{payload['priority']}",
+        ]
+    elif tool_name == "update_work_order":
+        lines = [
+            f"已生成工单 {payload['work_order_id']} 的更新草稿，尚未写入：",
+            f"- 更新前：{json.dumps(before, ensure_ascii=False)}",
+            f"- 计划变化：{json.dumps(payload['changes'], ensure_ascii=False)}",
+        ]
+    elif tool_name == "close_work_order":
+        lines = [
+            f"已生成关闭工单 {payload['work_order_id']} 的草稿，尚未写入：",
+            f"- 当前状态：{before.get('status') if before else '未知'}",
+            f"- 处理结果：{payload['result']}",
+        ]
+    else:
+        lines = [
+            f"已生成删除工单 {payload['work_order_id']} 的草稿，尚未删除。",
+            "删除采用软删除并保留完整审计，需要连续完成两次确认。",
+        ]
+    lines.append(f"操作编号：{action['id']}。请在确认卡中确认或取消。")
+    return "\n".join(lines)
+
+
 def execute_chat(
-    conversation_id: str | None, content: str
+    conversation_id: str | None,
+    content: str,
+    *,
+    release_id_override: str | None = None,
+    resume_from_human: bool = False,
 ) -> Iterator[str]:
-    run = db.prepare_run(conversation_id, content)
+    run = db.prepare_run(
+        conversation_id, content, release_id_override=release_id_override
+    )
     started = time.perf_counter()
     trace(run, "run_started", {"conversation_id": run["conversation_id"]})
     trace(
@@ -141,7 +250,86 @@ def execute_chat(
         },
     )
 
-    adapter = DeepSeekAdapter()
+    if not resume_from_human and codrive.is_handoff_request(content):
+        agent = next(
+            (
+                item
+                for item in run["release_config"].get("agents", [])
+                if item.get("id") == "general-service"
+            ),
+            run["release_config"]["agents"][0],
+        )
+        trace(
+            run,
+            "agent_selected",
+            {"agent_id": agent["id"], "agent_name": agent["name"], "source": "handoff_rule"},
+        )
+        session = codrive.request_human(
+            run["conversation_id"],
+            actor="USER",
+            reason=content,
+            summary="用户主动请求员工协助；请先阅读本会话完整消息和最近 Run 证据。",
+        )
+        trace(
+            run,
+            "codrive_handoff_requested",
+            {
+                "conversation_id": run["conversation_id"],
+                "state": session["state"],
+                "version": session["version"],
+                "ai_standby": True,
+            },
+        )
+        answer = (
+            "已发起人机共驾，员工可以在员工工作台查看完整对话和交接信息。"
+            "AI 会始终保持待命；在员工点击“交还 AI”前，AI 不会与员工并发回复。"
+        )
+        yield sse("agent_selected", {"agent_id": agent["id"], "agent_name": agent["name"]})
+        yield sse("codrive", session)
+        yield sse("delta", {"content": answer})
+        done = _finish_deterministic(
+            run, agent, answer, started, extra={"codrive": session}
+        )
+        yield sse("done", done)
+        return
+
+    if not resume_from_human and codrive.is_human_output_state(run["conversation_id"]):
+        state = codrive.get_session(run["conversation_id"], include_events=False)
+        trace(
+            run,
+            "codrive_ai_suppressed",
+            {
+                "conversation_id": run["conversation_id"],
+                "state": state["state"],
+                "reason": "当前输出权属于员工或等待员工接受",
+                "ai_standby": True,
+            },
+        )
+        latency_ms = round((time.perf_counter() - started) * 1000)
+        db.finish_run_without_answer(run["run_id"], agent_id=None, latency_ms=latency_ms)
+        done = {
+            "run_id": run["run_id"],
+            "status": "DONE",
+            "release_id": run["release_id"],
+            "release_version": run["release_version"],
+            "latency_ms": latency_ms,
+            "human_active": True,
+            "codrive": state,
+            "estimated_cost": None,
+            "estimated_cost_cny": None,
+            "display_currency": "CNY",
+        }
+        trace(run, "done", done)
+        yield sse("human_active", state)
+        yield sse("done", done)
+        return
+
+    adapter: DeepSeekAdapter | None = None
+    adapter_init_error: Exception | None = None
+    try:
+        adapter = DeepSeekAdapter()
+    except Exception as exc:
+        adapter_init_error = exc
     matching_mcp = mcp_runtime.matching_servers(run["release_config"], content)
     mcp_preflight: dict[str, Any] = {"matched": False}
     trace(
@@ -155,6 +343,8 @@ def execute_chat(
     )
     if matching_mcp:
         try:
+            if adapter is None:
+                raise adapter_init_error or RuntimeError("Model Adapter unavailable")
             trace(run, "cloud_call_started", {"phase": "mcp_preflight", "model": "deepseek-v4-flash"})
             preflight_content, preflight_snap = adapter.complete(
                 mcp_runtime.preflight_messages(matching_mcp, content)
@@ -217,6 +407,15 @@ def execute_chat(
             "id": item["id"],
             "name": item.get("name", item["id"]),
             "description": item.get("description", ""),
+            "released_tools": [
+                {
+                    "tool_id": tool.get("tool_id"),
+                    "name": tool.get("name", ""),
+                    "description": tool.get("description", ""),
+                }
+                for tool in run["release_config"].get("tools", [])
+                if item["id"] in tool.get("agent_ids", [])
+            ],
         }
         for item in released_agents
     ]
@@ -237,6 +436,8 @@ def execute_chat(
 
     route: dict[str, Any]
     try:
+        if adapter is None:
+            raise adapter_init_error or RuntimeError("Model Adapter unavailable")
         trace(run, "cloud_call_started", {"phase": "router", "model": "deepseek-v4-flash"})
         router_content, router_snap = adapter.complete(router_prompt)
         db.save_cloud_snap(run["run_id"], "router", router_snap)
@@ -251,7 +452,7 @@ def execute_chat(
         )
         route = parse_route(router_content, allowed_agent_ids)
     except Exception as exc:
-        route = deterministic_route(content, released_agents)
+        route = deterministic_route(content, released_agents, run["release_config"])
         route["fallback_reason"] = type(exc).__name__
         trace(
             run,
@@ -266,6 +467,155 @@ def execute_chat(
         "agent_selected",
         {"agent_id": agent["id"], "agent_name": agent["name"]},
     )
+    released_tool_ids = work_orders.tool_ids_for_agent(
+        run["release_config"], agent["id"]
+    )
+    preset_read_result: dict[str, Any] | None = None
+    preset_context = ""
+    write_plan = work_orders.plan_write(content, released_tool_ids)
+    if write_plan:
+        trace(
+            run,
+            "preset_tool_selected",
+            {
+                "tool_name": write_plan["tool_id"],
+                "read_only": False,
+                "agent_id": agent["id"],
+                "release_id": run["release_id"],
+            },
+        )
+        yield sse("route_decision", route)
+        yield sse(
+            "agent_selected",
+            {"agent_id": agent["id"], "agent_name": agent["name"]},
+        )
+        if write_plan["missing_fields"]:
+            missing = "、".join(write_plan["missing_fields"])
+            answer = (
+                f"要生成 {write_plan['tool_id']} 草稿，还需要一次性补充：{missing}。"
+                "信息完整后我只会生成确认卡，未经确认不会写入工单。"
+            )
+            trace(
+                run,
+                "action_draft_information_incomplete",
+                {
+                    "tool_name": write_plan["tool_id"],
+                    "missing_fields": write_plan["missing_fields"],
+                    "raw_user_input": content,
+                },
+            )
+            yield sse("delta", {"content": answer})
+            done = _finish_deterministic(
+                run,
+                agent,
+                answer,
+                started,
+                extra={"action": {"draft_created": False, "missing_fields": write_plan["missing_fields"]}},
+            )
+            yield sse("done", done)
+            return
+        action = action_gateway.create_draft(
+            tool_name=write_plan["tool_id"],
+            payload=write_plan["payload"],
+            release_id=run["release_id"],
+            idempotency_key=f"{run['run_id']}:{write_plan['tool_id']}",
+            conversation_id=run["conversation_id"],
+            source_run_id=run["run_id"],
+            actor="USER",
+        )
+        trace(
+            run,
+            "action_draft_created",
+            {
+                "action_id": action["id"],
+                "tool_name": action["tool_name"],
+                "payload": action["payload"],
+                "before": action["before"],
+                "status": action["status"],
+                "required_confirmations": action["required_confirmations"],
+                "confirmation_token_persisted": False,
+            },
+        )
+        answer = _action_summary(action)
+        yield sse("action_pending", action)
+        yield sse("delta", {"content": answer})
+        done = _finish_deterministic(
+            run,
+            agent,
+            answer,
+            started,
+            extra={
+                "action": {
+                    "action_id": action["id"],
+                    "tool_name": action["tool_name"],
+                    "status": action["status"],
+                    "required_confirmations": action["required_confirmations"],
+                }
+            },
+        )
+        yield sse("done", done)
+        return
+
+    read_plan = work_orders.plan_read(content, released_tool_ids)
+    if read_plan:
+        trace(
+            run,
+            "preset_tool_selected",
+            {
+                "tool_name": read_plan["tool_id"],
+                "read_only": True,
+                "agent_id": agent["id"],
+                "release_id": run["release_id"],
+            },
+        )
+        trace(
+            run,
+            "preset_tool_request",
+            {
+                "tool_name": read_plan["tool_id"],
+                "arguments": read_plan["arguments"],
+                "started_at": db.now_iso(),
+                "model_api_cost": 0,
+            },
+        )
+        tool_started = time.perf_counter()
+        try:
+            preset_read_result = work_orders.execute_read(
+                read_plan["tool_id"], read_plan["arguments"]
+            )
+            tool_latency_ms = round((time.perf_counter() - tool_started) * 1000)
+            trace(
+                run,
+                "preset_tool_response",
+                {
+                    "tool_name": read_plan["tool_id"],
+                    "status": "SUCCESS",
+                    "result": preset_read_result,
+                    "result_length": len(json.dumps(preset_read_result, ensure_ascii=False)),
+                    "latency_ms": tool_latency_ms,
+                    "finished_at": db.now_iso(),
+                    "model_api_cost": 0,
+                },
+            )
+            preset_context = (
+                "\n\n以下是当前 Release 允许的预置只读 Tool 返回的真实工单数据。"
+                "只能依据这些字段回答，不得补造：\n"
+                + json.dumps(preset_read_result, ensure_ascii=False)
+            )
+        except Exception as exc:
+            trace(
+                run,
+                "preset_tool_response",
+                {
+                    "tool_name": read_plan["tool_id"],
+                    "status": "FAILED",
+                    "error": f"{type(exc).__name__}: {str(exc)}"[:1000],
+                    "latency_ms": round((time.perf_counter() - tool_started) * 1000),
+                    "finished_at": db.now_iso(),
+                    "model_api_cost": 0,
+                },
+            )
+            preset_context = "\n\n预置工单 Tool 调用失败。必须明确说明暂时无法取得工单事实，不得编造。"
     mcp_snap: dict[str, Any] | None = None
     mcp_context = ""
     if mcp_preflight.get("matched"):
@@ -461,13 +811,15 @@ def execute_chat(
     messages = [
         {
             "role": "system",
-            "content": agent["system_prompt"] + skill_prompt(skills) + rag.prompt_context(rag_result) + mcp_context,
+            "content": agent["system_prompt"] + skill_prompt(skills) + rag.prompt_context(rag_result) + mcp_context + preset_context,
         },
         *history,
     ]
     answer_parts: list[str] = []
     final_snap: dict[str, Any] | None = None
     try:
+        if adapter is None:
+            raise adapter_init_error or RuntimeError("Model Adapter unavailable")
         trace(
             run,
             "cloud_call_started",
@@ -562,10 +914,46 @@ def execute_chat(
                 "status": mcp_snap.get("status") if mcp_snap else None,
                 "model_api_cost": 0,
             },
+            "preset_tool": {
+                "called": preset_read_result is not None,
+                "tool_name": preset_read_result.get("tool_name") if preset_read_result else None,
+                "model_api_cost": 0,
+            },
         }
         trace(run, "done", done_payload)
         yield sse("done", done_payload)
     except Exception as exc:
+        if preset_read_result is not None:
+            trace(
+                run,
+                "cloud_call_failed",
+                {
+                    "phase": "main_agent",
+                    "model": "deepseek-v4-flash",
+                    "error_code": type(exc).__name__,
+                    "fallback": "deterministic_preset_tool_answer",
+                },
+            )
+            answer = work_orders.format_read_answer(preset_read_result)
+            for index in range(0, len(answer), 96):
+                yield sse("delta", {"content": answer[index : index + 96]})
+            done = _finish_deterministic(
+                run,
+                agent,
+                answer,
+                started,
+                extra={
+                    "degraded": True,
+                    "degraded_reason": "main_agent_model_unavailable",
+                    "preset_tool": {
+                        "called": True,
+                        "tool_name": preset_read_result.get("tool_name"),
+                        "model_api_cost": 0,
+                    },
+                },
+            )
+            yield sse("done", done)
+            return
         error_code = type(exc).__name__
         db.fail_run(run["run_id"], error_code)
         trace(run, "error", {"error_code": error_code})

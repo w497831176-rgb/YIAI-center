@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from . import action_gateway, codrive, work_orders
 from .config import settings
 
 
@@ -395,6 +396,28 @@ def init_db() -> None:
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(6, ?)",
                 (now_iso(),),
             )
+            applied.add(6)
+        if 7 not in applied:
+            conn.executescript(work_orders.MIGRATION_7)
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(7, ?)",
+                (now_iso(),),
+            )
+            applied.add(7)
+        if 8 not in applied:
+            conn.executescript(action_gateway.MIGRATION_8)
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(8, ?)",
+                (now_iso(),),
+            )
+            applied.add(8)
+        if 9 not in applied:
+            conn.executescript(codrive.MIGRATION_9)
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(9, ?)",
+                (now_iso(),),
+            )
+            applied.add(9)
         count = conn.execute("SELECT COUNT(*) AS n FROM releases").fetchone()["n"]
         if count == 0:
             release_id = "rel_v055_default"
@@ -417,6 +440,18 @@ def init_db() -> None:
                 (release_id,),
             )
         _ensure_agent_configs(conn)
+        conn.execute(
+            """
+            UPDATE agent_configs
+            SET description='查询工单事实并通过统一确认网关处理工单变更',
+                system_prompt='你是领域无关的工单处理 Agent。只使用当前 Release 已绑定的预置工单 Tool；查询结果必须来自 Tool，写操作必须先展示草稿并经过服务端确认，不得声称未执行的操作已经完成。',
+                updated_at=?
+            WHERE id='work-order-service'
+              AND system_prompt='你是领域无关的工单处理 Agent。当前版本尚未接入工单 Tool，只能说明准备执行的步骤，不得声称已创建、更新或关闭工单。'
+            """,
+            (now_iso(),),
+        )
+        work_orders.ensure_demo_orders(conn, now_iso())
 
 
 def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
@@ -705,11 +740,13 @@ def _agent_binding_details(conn: sqlite3.Connection, agent: dict[str, Any]) -> d
                     "tool_name": binding.get("tool_name"),
                 }
             )
+    tool_by_id = {item["id"]: item for item in work_orders.available_tools()}
+    preset_tools = [tool_by_id[tool_id] for tool_id in agent["tool_ids"] if tool_id in tool_by_id]
     return {
         "skills": skills,
         "rag_documents": rag_documents,
         "mcp_tools": mcp_tools,
-        "preset_tools": [],
+        "preset_tools": preset_tools,
     }
 
 
@@ -720,7 +757,7 @@ def get_agent_config(agent_id: str) -> dict[str, Any]:
             raise KeyError(agent_id)
         result = _agent_row_dict(row)
         result["bindings"] = _agent_binding_details(conn, result)
-        result["available_preset_tools"] = []
+        result["available_preset_tools"] = work_orders.available_tools()
         return result
 
 
@@ -831,8 +868,10 @@ def _agent_validation_errors(
             errors.append(
                 f"MCP Tool {binding['server_id']} / {binding['tool_name']} 不在可绑定只读清单"
             )
-    if values["tool_ids"]:
-        errors.append("当前版本没有可绑定的预置 Tool")
+    known_tool_ids = {item["id"] for item in work_orders.available_tools()}
+    for tool_id in values["tool_ids"]:
+        if tool_id not in known_tool_ids:
+            errors.append(f"预置 Tool {tool_id} 不存在")
     return errors
 
 
@@ -1511,7 +1550,7 @@ def _candidate_config(conn: sqlite3.Connection, active_config: dict[str, Any]) -
                 "last_test": json.loads(row["last_test_json"]),
             }
         )
-    config["tools"] = []
+    config["tools"] = work_orders.released_tools(tool_agent_ids)
     return config
 
 
@@ -1604,6 +1643,8 @@ def get_release_detail(release_id: str) -> dict[str, Any]:
     active_rag = ids(active["config"], "rag", "rag_version_id")
     target_mcp = ids(target["config"], "mcp", "server_id")
     active_mcp = ids(active["config"], "mcp", "server_id")
+    target_tools = ids(target["config"], "tools", "tool_id")
+    active_tools = ids(active["config"], "tools", "tool_id")
     target_mcp_by_id = {item["server_id"]: item for item in target["config"].get("mcp", [])}
     active_mcp_by_id = {item["server_id"]: item for item in active["config"].get("mcp", [])}
     mcp_changed = {
@@ -1692,11 +1733,19 @@ def get_release_detail(release_id: str) -> dict[str, Any]:
         "mcp_removed": sorted(active_mcp - target_mcp),
         "mcp_changed": sorted(mcp_changed),
         "mcp_unchanged": sorted((target_mcp & active_mcp) - mcp_changed),
+        "tools_added": sorted(target_tools - active_tools),
+        "tools_removed": sorted(active_tools - target_tools),
+        "tools_unchanged": sorted(target_tools & active_tools),
     }
     return target
 
 
-def prepare_run(conversation_id: str | None, content: str) -> dict[str, Any]:
+def prepare_run(
+    conversation_id: str | None,
+    content: str,
+    *,
+    release_id_override: str | None = None,
+) -> dict[str, Any]:
     conversation_id = conversation_id or new_id("conv")
     message_id = new_id("msg")
     run_id = new_id("run")
@@ -1710,12 +1759,18 @@ def prepare_run(conversation_id: str | None, content: str) -> dict[str, Any]:
                 "INSERT INTO conversations(id, created_at) VALUES(?, ?)",
                 (conversation_id, started_at),
             )
-        active = conn.execute(
-            """
-            SELECT r.id, r.version, r.config_json FROM releases r
-            JOIN workspaces w ON w.active_release_id=r.id WHERE w.id='default'
-            """
-        ).fetchone()
+        if release_id_override:
+            active = conn.execute(
+                "SELECT id, version, config_json FROM releases WHERE id=?",
+                (release_id_override,),
+            ).fetchone()
+        else:
+            active = conn.execute(
+                """
+                SELECT r.id, r.version, r.config_json FROM releases r
+                JOIN workspaces w ON w.active_release_id=r.id WHERE w.id='default'
+                """
+            ).fetchone()
         if active is None:
             raise RuntimeError("Active Release not found")
         conn.execute(
@@ -1843,18 +1898,34 @@ def conversation_history(conversation_id: str, limit: int = 12) -> list[dict[str
     with connection() as conn:
         rows = conn.execute(
             """
-            SELECT role, content FROM messages WHERE conversation_id=?
-            ORDER BY created_at DESC LIMIT ?
+            SELECT role, content FROM (
+                SELECT role, content, created_at, id
+                FROM messages WHERE conversation_id=?
+                UNION ALL
+                SELECT role, content, created_at, id
+                FROM human_messages WHERE conversation_id=?
+            ) ORDER BY created_at DESC, id DESC LIMIT ?
             """,
-            (conversation_id, limit),
+            (conversation_id, conversation_id, limit),
         ).fetchall()
-        return [dict(row) for row in reversed(rows)]
+        result = []
+        for row in reversed(rows):
+            item = dict(row)
+            if item["role"] == "staff":
+                item = {"role": "user", "content": f"【员工回复】{item['content']}"}
+            result.append(item)
+        return result
 
 
 def list_conversations(limit: int = 100) -> list[dict[str, Any]]:
     with connection() as conn:
         rows = conn.execute(
             """
+            WITH all_messages AS (
+                SELECT conversation_id, created_at, id FROM messages
+                UNION ALL
+                SELECT conversation_id, created_at, id FROM human_messages
+            )
             SELECT c.id,
                    c.created_at,
                    MAX(m.created_at) AS updated_at,
@@ -1868,7 +1939,7 @@ def list_conversations(limit: int = 100) -> list[dict[str, Any]]:
                        LIMIT 1
                    ) AS first_user_message
             FROM conversations c
-            JOIN messages m ON m.conversation_id=c.id
+            JOIN all_messages m ON m.conversation_id=c.id
             GROUP BY c.id, c.created_at
             ORDER BY updated_at DESC
             LIMIT ?
@@ -1927,6 +1998,23 @@ def finish_run(
         "estimated_cost": cost,
         "estimated_cost_cny": estimated_cost_cny,
     }
+
+
+def finish_run_without_answer(
+    run_id: str,
+    *,
+    agent_id: str | None,
+    latency_ms: int,
+) -> dict[str, Any]:
+    with connection() as conn:
+        conn.execute(
+            """
+            UPDATE runs SET agent_id=?, status='DONE', finished_at=?, latency_ms=?, estimated_cost=NULL
+            WHERE id=?
+            """,
+            (agent_id, now_iso(), latency_ms, run_id),
+        )
+    return {"estimated_cost": None, "estimated_cost_cny": None}
 
 
 def fail_run(run_id: str, error_code: str) -> None:
@@ -2062,4 +2150,25 @@ def get_messages(conversation_id: str) -> list[dict[str, Any]]:
                     None,
                 )
                 message["agent_name"] = match["name"] if match else agent_id
+        result.extend(
+            {
+                **dict(row),
+                "run_id": None,
+                "release_id": None,
+                "agent_id": None,
+                "release_version": None,
+                "run_status": None,
+                "run_started_at": None,
+                "run_finished_at": None,
+                "agent_name": None,
+            }
+            for row in conn.execute(
+                """
+                SELECT id, conversation_id, role, content, created_at
+                FROM human_messages WHERE conversation_id=?
+                """,
+                (conversation_id,),
+            ).fetchall()
+        )
+        result.sort(key=lambda item: (item["created_at"], item["id"]))
         return result
