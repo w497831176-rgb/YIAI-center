@@ -1,6 +1,7 @@
 # YIAI Center 架构全局 Y/N
 
-> 当前版本：V0.5.5  
+> 当前版本：V0.5.6  
+> 最近复核：2026-07-21，已启用第二号前向迁移与 SkillVersion／Release 快照  
 > 文档视角：系统架构与后端工程  
 > 文档性质：Living Doc（动态工作记忆），不是不可变技术规范  
 > 用途：回答“技术上必须怎样实现、哪些权威只能有一个、哪些实现绝对禁止”  
@@ -39,8 +40,8 @@
 - [Y] V0.5 后端使用 Python 3.12 标准库 HTTP Server、SQLite 和 urllib，保持零第三方运行依赖。
 - [N] 当前不引入 FastAPI、Pydantic 和 httpx；目标机外部 Python 包下载被代理中断，演示闭环不应被框架依赖阻塞。
 - [Y] 对话和运行事件使用 SSE。
-- [Y] 数据使用 SQLite WAL 和轻量前向迁移表；V0.5 只有一份初始化迁移。
-- [N] 当前演示版本不为单一 SQLite 初始化引入 Alembic；出现第二次真实表结构变更时再评估。
+- [Y] 数据使用 SQLite WAL 和可重复执行的轻量前向迁移；V0.5.6 已从初始化迁移进入第二号迁移。
+- [N] 当前演示版本不引入 Alembic；迁移由单一数据库模块按版本顺序执行，不删除或重建 SQLite。
 - [Y] Embedding 默认本地运行。
 - [Y] DeepSeek API 作为云模型 Provider。
 - [Y] FastGPT 只能作为可替换 Engine Adapter 候选。

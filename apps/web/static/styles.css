@@ -24,6 +24,10 @@ textarea {
   font: inherit;
 }
 
+fieldset {
+  font: inherit;
+}
+
 button {
   cursor: pointer;
 }
@@ -627,6 +631,146 @@ main {
   color: #ae4242;
 }
 
+.status.validated {
+  background: #dff6ee;
+  color: #1f7e66;
+}
+
+.status.draft {
+  background: #fff2d8;
+  color: #9a6716;
+}
+
+.status.disabled {
+  background: #eef1f5;
+  color: #6b7586;
+}
+
+.capability-form {
+  margin: 18px 0 24px;
+  padding: 18px;
+  border: 1px solid #e4e8ef;
+  border-radius: 14px;
+  background: #fafbfc;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.capability-form label > span,
+.capability-form legend {
+  display: block;
+  margin-bottom: 6px;
+  color: #6f7b8e;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.capability-form input[type="text"],
+.capability-form input:not([type]),
+.capability-form textarea {
+  width: 100%;
+  border: 1px solid #dbe2eb;
+  border-radius: 10px;
+  background: white;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.capability-form .full {
+  grid-column: 1 / -1;
+}
+
+.capability-form fieldset {
+  border: 1px solid #dbe2eb;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.capability-form fieldset label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 18px;
+  font-size: 12px;
+}
+
+.form-actions,
+.card-actions,
+.detail-card-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.form-actions button:first-child {
+  border: 0;
+  border-radius: 10px;
+  background: #182235;
+  color: white;
+  padding: 10px 16px;
+  font-weight: 700;
+}
+
+.capability-list {
+  display: grid;
+  gap: 12px;
+}
+
+.capability-card,
+.detail-card {
+  border: 1px solid #e4e8ef;
+  border-radius: 14px;
+  padding: 16px;
+  background: white;
+}
+
+.capability-card-head,
+.detail-card-head {
+  justify-content: space-between;
+}
+
+.capability-card h3,
+.detail-card h3 {
+  margin: 6px 0;
+}
+
+.capability-card > p,
+.capability-card-head small {
+  color: #7b8495;
+}
+
+.capability-card details {
+  margin: 12px 0;
+}
+
+.capability-card pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 12px;
+  border-radius: 9px;
+  background: #f5f7fa;
+  line-height: 1.55;
+}
+
+.validation-errors {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-left: 3px solid #d45b5b;
+  background: #fff3f3;
+  color: #9b3d3d;
+  font-size: 12px;
+}
+
+.validation-errors p {
+  margin: 3px 0;
+}
+
+.detail-card {
+  margin-top: 16px;
+  background: #f8fafc;
+}
+
 .runs-grid {
   margin-top: 18px;
   display: grid;
@@ -929,7 +1073,8 @@ main {
   }
 
   .release-form,
-  .runs-grid {
+  .runs-grid,
+  .capability-form {
     grid-template-columns: 1fr;
   }
 

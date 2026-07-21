@@ -1,6 +1,6 @@
 # YIAI Center 小步迭代版本规划
 
-> 当前版本：V0.5.5  
+> 当前版本：V0.5.6  
 > 文档视角：产品交付与开发拆解  
 > 文档性质：Living Roadmap（动态路线图），不是固定排期承诺  
 > 用途：把产品全局 Y/N 和架构全局 Y/N 拆成小功能、小版本和真实验收  
@@ -68,12 +68,12 @@
 ## 3. 当前总状态
 
 - V0.5.0 三份全局文档基线：已确认并完成。
-- V0.5.1—V0.5.5：已在同一授权批次完成实现、部署和后端自测；2026-07-21 又完成一次不升版本号的页面与 Trace 纠偏。
+- V0.5.1—V0.5.6：已完成实现、部署和后端自测；V0.5.6 增加自然语言 Skill 的完整发布闭环。
 - 产品代码：已推送到 GitHub `main`；核心实现提交为 `e47ca3f`，Living Docs 在后续提交持续同步。
 - Windows 10 Docker 主机：只读检查完成；独立 Compose `yiai-center` 已部署。
 - DeepSeek API：V4-Flash 非流式、流式和真实运行 Gate 已通过。
 - 当前访问地址：`http://192.168.50.232:19080`。
-- 当前 Active Release：`V0.5.5-default`。
+- 当前 Active Release：`V0.5.6-skill-demo`。
 - 远程只读 MCP Server：等待产品负责人提供或选择。
 - 三篇通用 RAG 长文档：等待后续专门版本编写。
 
@@ -385,7 +385,18 @@
 - 绑定并发布后激活。
 - 历史 Run 保留旧 SkillVersion。
 
-当前状态：待开始。
+当前状态：已完成（2026-07-21）。
+
+真实证据：
+
+- 第二号前向迁移在保留 9 条历史 Run 和 8 个 Conversation 的 SQLite 上成功应用。
+- 7 条标准库契约测试通过；其中 3 条专门覆盖 Skill 发布边界。
+- Skill `skill_029d70e05b8146b68eed17a1107e8845` 校验为 `VALIDATED`，不可变版本为 `skillv_e14783966d0f49ef80dc354faa367082`。
+- Candidate `rel_9194ba42cc254102b6f46017908f92ca` 创建后 Active 仍为 `V0.5.5-default`，Diff 显示新增上述 SkillVersion。
+- 发布前 Run `run_dfe0fa51b40940a187d6fa66ab160267` 没有 `skill_activated`；发布后同一会话 Run `run_80e84830fb3b455b839869a6f9a962af` 固定 `V0.5.6-skill-demo` 并记录唯一 `skill_activated`。
+- 发布后真实回答按 Skill 要求以“结论先行：”开头；该 Run 有 2 个真实 V4-Flash Snap，人民币成本 `0.000797328`。
+
+未完成：浏览器视觉与表单交互体验交由产品负责人手动验证。
 
 ## 11. V0.5.7——Git Skill 安全导入
 

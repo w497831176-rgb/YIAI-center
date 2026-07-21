@@ -1,6 +1,6 @@
 # YIAI Center 实际实现说明
 
-> 当前版本：V0.5.5  
+> 当前版本：V0.5.6  
 > 文档性质：Living Implementation Doc（动态实现记忆）  
 > 用途：对照产品、架构和版本规划，说明代码事实上怎样运行、为什么这样实现、当前没做什么  
 > 当前部署：已部署并通过后端自测  
@@ -16,7 +16,7 @@
 
 ## 1. 当前交付结论
 
-V0.5.0—V0.5.5 已形成一个可以真实演示的最小闭环：
+V0.5.0—V0.5.6 已形成一个可以真实演示的最小闭环：
 
 1. 打开一个无登录、无行业迹象的三 TAB 页面。
 2. 用户发送一条消息。
@@ -31,6 +31,8 @@ V0.5.0—V0.5.5 已形成一个可以真实演示的最小闭环：
 11. AI 气泡下方可以打开右侧 Run 详情抽屉。
 12. 新 Run 的 Trace 同时记录完整用户输入和客服最终回答。
 13. CloudCallSnap 直接嵌入对应 Trace 步骤，页面统一显示人民币本步成本，底部汇总 Run 总成本。
+14. 平台创建和编辑自然语言 Skill，每次保存形成不可变 SkillVersion。
+15. 只有已校验、已绑定且随 Candidate 人工发布的 SkillVersion 才进入新 Run Prompt；历史 Run 保留旧 Release 快照。
 
 当前访问地址：
 
@@ -133,7 +135,7 @@ Run 与 Trace 页面：
 - 在对应 Trace 步骤内查看每次 Router／主 Agent 云调用的 CloudCallSnap。
 - 查看三类 Token、延迟、Usage 状态、人民币本步成本和 Run 底部汇总。
 
-Agent、Skill、RAG、MCP、Badcase 和完整成本治理页面只显示为后续版本，不提供假按钮。
+Agent、RAG、MCP、Badcase 和完整成本治理页面仍为后续版本；Skill 页面已经接入真实数据与发布闭环。
 
 ## 3. 实际技术形态
 
@@ -337,14 +339,25 @@ Router 云调用失败或结构非法时：
 
 气泡抽屉和平台管理共用同一个 Run 详情渲染函数与 `GET /api/runs/{run_id}`，没有第二套 Trace 或成本计算。
 
-### 5.7 `apps/api/tests`
+### 5.7 Skill 与 Release 快照
 
-包含四条标准库 unittest：
+- `skills` 保存可编辑控制面记录和当前版本指针。
+- `skill_versions` 每次保存追加不可变正文、内容 Hash 和版本号。
+- `release_bindings` 保存 Release、SkillVersion 与垂直 Agent 的绑定快照。
+- Candidate 从当前已校验控制面能力生成配置；只创建 Candidate 不切换 Active。
+- Runtime 只读取 Run 固定的 Release 配置，写入 `skill_considered` 与 `skill_activated`，并把已发布正文注入对应 Agent Prompt。
+
+### 5.8 `apps/api/tests`
+
+包含七条标准库 unittest：
 
 - 完整 Usage。
 - 缺失 Usage。
 - 非法多 Agent。
 - 缺失 Usage 时答案继续、成本为 null、创建疑似 Badcase。
+- Skill 未发布不进入 Prompt、Candidate 不影响在线、发布后新消息激活。
+- 编辑产生不可变新版本且 Active Release 仍保留旧版本。
+- 未绑定 Skill 校验失败，正文不执行脚本。
 
 ## 6. Release 实际实现
 
@@ -461,9 +474,19 @@ miss、hit、completion、prompt 都必须是整数
 Release：
 
 - `GET /api/releases`
+- `GET /api/releases/{release_id}`（含 Diff）
 - `POST /api/releases/candidates`
 - `POST /api/releases/{release_id}/publish`
 - `POST /api/releases/{release_id}/rollback`
+
+Skill：
+
+- `GET /api/skills`
+- `POST /api/skills`
+- `GET /api/skills/{skill_id}`
+- `PUT /api/skills/{skill_id}`
+- `POST /api/skills/{skill_id}/validate`
+- `POST /api/skills/{skill_id}/disable`
 
 对话：
 
@@ -514,6 +537,8 @@ Run 与 Trace：
 - 首页：HTTP 200。
 - SQLite：存在并在容器重建后保留 Run。
 - `immich_machine_learning`：running。
+- 数据库迁移版本：2；部署前副本为 `data/yiai-center.sqlite.pre-v056-20260721`。
+- Active Release：`V0.5.6-skill-demo`。
 
 ## 11. 与产品和架构 Y/N 的对照结论
 
@@ -546,7 +571,6 @@ Run 与 Trace：
 以下功能仍是产品全局中的后续规划，不是 V0.5.5 已完成功能：
 
 - Agent 配置编辑页面。
-- 自然语言 Skill 编辑、绑定和发布。
 - Git Skill 导入和脚本拒绝。
 - 文本 RAG 和三篇通用长文档。
 - 远程只读 MCP。
@@ -588,12 +612,20 @@ Trace 证明：
 
 该 ERROR Run 不删除，用于展示真实 Trace 和问题闭环。
 
-## 14. 下一版本如何继续
+## 14. V0.5.6 代表证据
 
-开始 V0.5.6 前：
+- Skill：`skill_029d70e05b8146b68eed17a1107e8845`。
+- SkillVersion：`skillv_e14783966d0f49ef80dc354faa367082`。
+- Candidate／当前 Active Release：`rel_9194ba42cc254102b6f46017908f92ca`／`V0.5.6-skill-demo`。
+- 发布前 Run：`run_dfe0fa51b40940a187d6fa66ab160267`，无 Skill 激活。
+- 发布后同会话 Run：`run_80e84830fb3b455b839869a6f9a962af`，Trace 固定上述 SkillVersion，回答遵循正文，2 个真实 V4-Flash Snap，总成本 `0.000797328 CNY`。
+
+## 15. 下一版本如何继续
+
+开始 V0.5.7 前：
 
 1. 产品负责人先完成 04 文档的三条手动体验。
 2. 修复任何阻塞 V0.5.5 演示的问题。
 3. 重新阅读 01—05。
-4. 在 03 中填写 V0.5.6 开工卡。
-5. 只增加自然语言 Skill 编辑与发布，不提前实现 Git 导入、RAG 或 MCP。
+4. 在 03 中填写 V0.5.7 开工卡。
+5. 只增加 Git URL 纯文本 Skill 导入与拒绝规则，不执行仓库内容。

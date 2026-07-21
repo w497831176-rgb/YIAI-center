@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sqlite3
 import uuid
@@ -126,6 +127,50 @@ CREATE INDEX IF NOT EXISTS idx_trace_run ON trace_events(run_id, sequence);
 """
 
 
+MIGRATION_2 = """
+CREATE TABLE IF NOT EXISTS skills (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    applicability TEXT NOT NULL,
+    non_applicability TEXT NOT NULL,
+    output_requirements TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('DRAFT','VALIDATED','DISABLED')),
+    current_version_id TEXT NOT NULL,
+    agent_ids_json TEXT NOT NULL,
+    validation_errors_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS skill_versions (
+    id TEXT PRIMARY KEY,
+    skill_id TEXT NOT NULL REFERENCES skills(id),
+    version_number INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    applicability TEXT NOT NULL,
+    non_applicability TEXT NOT NULL,
+    content TEXT NOT NULL,
+    output_requirements TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    source_type TEXT NOT NULL DEFAULT 'MANUAL',
+    source_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    UNIQUE(skill_id, version_number)
+);
+CREATE TABLE IF NOT EXISTS release_bindings (
+    release_id TEXT NOT NULL REFERENCES releases(id),
+    capability_type TEXT NOT NULL,
+    component_version_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    config_json TEXT NOT NULL,
+    PRIMARY KEY(release_id, capability_type, component_version_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_skill_versions_skill ON skill_versions(skill_id, version_number DESC);
+CREATE INDEX IF NOT EXISTS idx_release_bindings_release ON release_bindings(release_id, capability_type);
+"""
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "router": {
         "id": "router-default",
@@ -166,6 +211,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "enabled_workflows": [],
         },
     },
+    "skills": [],
 }
 
 
@@ -176,6 +222,16 @@ def init_db() -> None:
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)",
             (now_iso(),),
         )
+        applied = {
+            row["version"]
+            for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+        }
+        if 2 not in applied:
+            conn.executescript(MIGRATION_2)
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(2, ?)",
+                (now_iso(),),
+            )
         count = conn.execute("SELECT COUNT(*) AS n FROM releases").fetchone()["n"]
         if count == 0:
             release_id = "rel_v055_default"
@@ -303,13 +359,16 @@ def create_candidate(version: str, change_summary: str) -> dict[str, Any]:
         ).fetchone()
         if active is None:
             raise RuntimeError("Active Release not found")
+        config = _candidate_config(conn, json.loads(active["config_json"]))
+        config_json = json.dumps(config, ensure_ascii=False)
         conn.execute(
             """
             INSERT INTO releases(id, version, status, change_summary, config_json, created_at)
             VALUES(?, ?, 'CANDIDATE', ?, ?, ?)
             """,
-            (release_id, version, change_summary, active["config_json"], now_iso()),
+            (release_id, version, change_summary, config_json, now_iso()),
         )
+        _save_release_bindings(conn, release_id, config)
         row = conn.execute(
             "SELECT id, version, status, change_summary, created_at, published_at FROM releases WHERE id=?",
             (release_id,),
@@ -350,6 +409,233 @@ def get_release(release_id: str) -> dict[str, Any]:
         result = dict(row)
         result["config"] = json.loads(result.pop("config_json"))
         return result
+
+
+def _skill_validation_errors(payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    fields = {
+        "name": 80,
+        "description": 500,
+        "applicability": 1000,
+        "non_applicability": 1000,
+        "content": 20000,
+        "output_requirements": 2000,
+    }
+    for field, maximum in fields.items():
+        value = str(payload.get(field, "")).strip()
+        if not value:
+            errors.append(f"{field} 不能为空")
+        elif len(value) > maximum:
+            errors.append(f"{field} 超过 {maximum} 字符")
+    if len(str(payload.get("content", "")).strip()) < 20:
+        errors.append("content 至少需要 20 个字符")
+    agent_ids = payload.get("agent_ids")
+    allowed_agents = {agent["id"] for agent in DEFAULT_CONFIG["agents"]}
+    if not isinstance(agent_ids, list) or not agent_ids:
+        errors.append("至少绑定一个垂直 Agent")
+    elif any(not isinstance(item, str) or item not in allowed_agents for item in agent_ids):
+        errors.append("agent_ids 包含未知垂直 Agent")
+    return errors
+
+
+def _skill_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": str(payload.get("name", "")).strip(),
+        "description": str(payload.get("description", "")).strip(),
+        "applicability": str(payload.get("applicability", "")).strip(),
+        "non_applicability": str(payload.get("non_applicability", "")).strip(),
+        "content": str(payload.get("content", "")).strip(),
+        "output_requirements": str(payload.get("output_requirements", "")).strip(),
+        "agent_ids": list(dict.fromkeys(payload.get("agent_ids") or [])),
+    }
+
+
+def save_skill(payload: dict[str, Any], skill_id: str | None = None) -> dict[str, Any]:
+    values = _skill_payload(payload)
+    timestamp = now_iso()
+    with connection() as conn:
+        if skill_id is None:
+            skill_id = new_id("skill")
+            version_number = 1
+            created_at = timestamp
+        else:
+            current = conn.execute("SELECT * FROM skills WHERE id=?", (skill_id,)).fetchone()
+            if current is None:
+                raise KeyError(skill_id)
+            version_number = conn.execute(
+                "SELECT COALESCE(MAX(version_number), 0) + 1 AS n FROM skill_versions WHERE skill_id=?",
+                (skill_id,),
+            ).fetchone()["n"]
+            created_at = current["created_at"]
+        version_id = new_id("skillv")
+        canonical = json.dumps(values, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        content_hash = hashlib.sha256(canonical).hexdigest()
+        errors = _skill_validation_errors(values)
+        if version_number == 1:
+            conn.execute(
+                """
+                INSERT INTO skills(
+                    id, name, description, applicability, non_applicability,
+                    output_requirements, status, current_version_id, agent_ids_json,
+                    validation_errors_json, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?)
+                """,
+                (
+                    skill_id, values["name"], values["description"], values["applicability"],
+                    values["non_applicability"], values["output_requirements"], version_id,
+                    json.dumps(values["agent_ids"], ensure_ascii=False),
+                    json.dumps(errors, ensure_ascii=False), created_at, timestamp,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE skills SET name=?, description=?, applicability=?, non_applicability=?,
+                    output_requirements=?, status='DRAFT', current_version_id=?, agent_ids_json=?,
+                    validation_errors_json=?, updated_at=? WHERE id=?
+                """,
+                (
+                    values["name"], values["description"], values["applicability"],
+                    values["non_applicability"], values["output_requirements"], version_id,
+                    json.dumps(values["agent_ids"], ensure_ascii=False),
+                    json.dumps(errors, ensure_ascii=False), timestamp, skill_id,
+                ),
+            )
+        conn.execute(
+            """
+            INSERT INTO skill_versions(
+                id, skill_id, version_number, name, description, applicability,
+                non_applicability, content, output_requirements, content_hash,
+                source_type, source_json, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MANUAL', '{}', ?)
+            """,
+            (
+                version_id, skill_id, version_number, values["name"], values["description"],
+                values["applicability"], values["non_applicability"], values["content"],
+                values["output_requirements"], content_hash, timestamp,
+            ),
+        )
+    return get_skill(skill_id)
+
+
+def get_skill(skill_id: str) -> dict[str, Any]:
+    with connection() as conn:
+        skill = conn.execute("SELECT * FROM skills WHERE id=?", (skill_id,)).fetchone()
+        if skill is None:
+            raise KeyError(skill_id)
+        versions = conn.execute(
+            "SELECT * FROM skill_versions WHERE skill_id=? ORDER BY version_number DESC",
+            (skill_id,),
+        ).fetchall()
+        result = dict(skill)
+        result["agent_ids"] = json.loads(result.pop("agent_ids_json"))
+        result["validation_errors"] = json.loads(result.pop("validation_errors_json"))
+        result["versions"] = rows_to_dicts(versions)
+        result["current_version"] = next(
+            item for item in result["versions"] if item["id"] == result["current_version_id"]
+        )
+        for item in result["versions"]:
+            item["source"] = json.loads(item.pop("source_json"))
+        return result
+
+
+def list_skills() -> list[dict[str, Any]]:
+    with connection() as conn:
+        ids = [row["id"] for row in conn.execute("SELECT id FROM skills ORDER BY updated_at DESC")]
+    return [get_skill(skill_id) for skill_id in ids]
+
+
+def validate_skill(skill_id: str) -> dict[str, Any]:
+    skill = get_skill(skill_id)
+    payload = {
+        **skill["current_version"],
+        "agent_ids": skill["agent_ids"],
+    }
+    errors = _skill_validation_errors(payload)
+    with connection() as conn:
+        conn.execute(
+            "UPDATE skills SET status=?, validation_errors_json=?, updated_at=? WHERE id=?",
+            (
+                "VALIDATED" if not errors else "DRAFT",
+                json.dumps(errors, ensure_ascii=False), now_iso(), skill_id,
+            ),
+        )
+    return get_skill(skill_id)
+
+
+def disable_skill(skill_id: str) -> dict[str, Any]:
+    with connection() as conn:
+        if conn.execute("SELECT 1 FROM skills WHERE id=?", (skill_id,)).fetchone() is None:
+            raise KeyError(skill_id)
+        conn.execute(
+            "UPDATE skills SET status='DISABLED', updated_at=? WHERE id=?",
+            (now_iso(), skill_id),
+        )
+    return get_skill(skill_id)
+
+
+def _candidate_config(conn: sqlite3.Connection, active_config: dict[str, Any]) -> dict[str, Any]:
+    config = json.loads(json.dumps(active_config, ensure_ascii=False))
+    rows = conn.execute(
+        """
+        SELECT s.id AS skill_id, s.agent_ids_json, v.*
+        FROM skills s JOIN skill_versions v ON v.id=s.current_version_id
+        WHERE s.status='VALIDATED' ORDER BY s.created_at, s.id
+        """
+    ).fetchall()
+    config["skills"] = [
+        {
+            "skill_id": row["skill_id"],
+            "skill_version_id": row["id"],
+            "version_number": row["version_number"],
+            "name": row["name"],
+            "description": row["description"],
+            "applicability": row["applicability"],
+            "non_applicability": row["non_applicability"],
+            "content": row["content"],
+            "output_requirements": row["output_requirements"],
+            "content_hash": row["content_hash"],
+            "agent_ids": json.loads(row["agent_ids_json"]),
+        }
+        for row in rows
+    ]
+    return config
+
+
+def _save_release_bindings(conn: sqlite3.Connection, release_id: str, config: dict[str, Any]) -> None:
+    for skill in config.get("skills", []):
+        for agent_id in skill.get("agent_ids", []):
+            conn.execute(
+                """
+                INSERT INTO release_bindings(
+                    release_id, capability_type, component_version_id, agent_id, config_json
+                ) VALUES(?, 'SKILL', ?, ?, ?)
+                """,
+                (
+                    release_id, skill["skill_version_id"], agent_id,
+                    json.dumps(skill, ensure_ascii=False),
+                ),
+            )
+
+
+def get_release_detail(release_id: str) -> dict[str, Any]:
+    target = get_release(release_id)
+    with connection() as conn:
+        active_id = conn.execute(
+            "SELECT active_release_id FROM workspaces WHERE id='default'"
+        ).fetchone()["active_release_id"]
+    active = get_release(active_id)
+    def ids(config: dict[str, Any], key: str, id_key: str) -> set[str]:
+        return {str(item[id_key]) for item in config.get(key, [])}
+    target_skills = ids(target["config"], "skills", "skill_version_id")
+    active_skills = ids(active["config"], "skills", "skill_version_id")
+    target["diff"] = {
+        "base_release_id": active_id,
+        "skills_added": sorted(target_skills - active_skills),
+        "skills_removed": sorted(active_skills - target_skills),
+        "skills_unchanged": sorted(target_skills & active_skills),
+    }
+    return target
 
 
 def prepare_run(conversation_id: str | None, content: str) -> dict[str, Any]:

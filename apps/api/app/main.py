@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import db
-from .config import settings
+from .config import PRODUCT_VERSION, settings
 from .runtime import execute_chat, sse
 
 
@@ -18,7 +18,7 @@ STATIC_ROOT = Path(__file__).resolve().parent.parent / "static"
 
 
 class YIAIHandler(BaseHTTPRequestHandler):
-    server_version = "YIAI-Center/0.5.5"
+    server_version = "YIAI-Center/0.5.6"
 
     def log_message(self, format_string: str, *args) -> None:
         print(
@@ -84,7 +84,7 @@ class YIAIHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     {
                         "status": "ok" if database == "ok" else "degraded",
-                        "version": "V0.5.5",
+                        "version": PRODUCT_VERSION,
                         "database": database,
                         "deepseek_configured": bool(settings.deepseek_api_key),
                         "default_model": settings.default_model,
@@ -99,6 +99,8 @@ class YIAIHandler(BaseHTTPRequestHandler):
                 self._send_json(db.get_workspace())
             elif path == "/api/releases":
                 self._send_json(db.list_releases())
+            elif path == "/api/skills":
+                self._send_json(db.list_skills())
             elif path == "/api/runs":
                 query = parse_qs(parsed.query)
                 limit = max(1, min(200, int(query.get("limit", ["50"])[0])))
@@ -113,6 +115,18 @@ class YIAIHandler(BaseHTTPRequestHandler):
                     self._send_json(db.get_run_detail(run_id))
                 except KeyError:
                     self._send_json({"detail": "Run not found"}, 404)
+            elif re.fullmatch(r"/api/skills/[^/]+", path):
+                skill_id = path.removeprefix("/api/skills/")
+                try:
+                    self._send_json(db.get_skill(skill_id))
+                except KeyError:
+                    self._send_json({"detail": "Skill not found"}, 404)
+            elif re.fullmatch(r"/api/releases/[^/]+", path):
+                release_id = path.removeprefix("/api/releases/")
+                try:
+                    self._send_json(db.get_release_detail(release_id))
+                except KeyError:
+                    self._send_json({"detail": "Release not found"}, 404)
             elif path.startswith("/api/conversations/") and path.endswith("/messages"):
                 conversation_id = path.removeprefix("/api/conversations/").removesuffix(
                     "/messages"
@@ -134,6 +148,22 @@ class YIAIHandler(BaseHTTPRequestHandler):
             self._chat_stream()
             return
         try:
+            if path == "/api/skills":
+                self._send_json(db.save_skill(self._read_json()), 201)
+                return
+            skill_action = re.fullmatch(r"/api/skills/([^/]+)/(validate|disable)", path)
+            if skill_action:
+                skill_id, action = skill_action.groups()
+                try:
+                    result = (
+                        db.validate_skill(skill_id)
+                        if action == "validate"
+                        else db.disable_skill(skill_id)
+                    )
+                    self._send_json(result)
+                except KeyError:
+                    self._send_json({"detail": "Skill not found"}, 404)
+                return
             if path == "/api/releases/candidates":
                 payload = self._read_json()
                 version = str(payload.get("version", "")).strip()
@@ -159,6 +189,22 @@ class YIAIHandler(BaseHTTPRequestHandler):
             self._send_json({"detail": "Invalid request"}, 400)
         except Exception as exc:
             print(f"POST {path} failed: {type(exc).__name__}", flush=True)
+            self._send_json({"detail": "Internal error"}, 500)
+
+    def do_PUT(self) -> None:
+        path = urlparse(self.path).path
+        match = re.fullmatch(r"/api/skills/([^/]+)", path)
+        if not match:
+            self._send_json({"detail": "Not found"}, 404)
+            return
+        try:
+            self._send_json(db.save_skill(self._read_json(), match.group(1)))
+        except KeyError:
+            self._send_json({"detail": "Skill not found"}, 404)
+        except (ValueError, json.JSONDecodeError):
+            self._send_json({"detail": "Invalid request"}, 400)
+        except Exception as exc:
+            print(f"PUT {path} failed: {type(exc).__name__}", flush=True)
             self._send_json({"detail": "Internal error"}, 500)
 
     def _chat_stream(self) -> None:
@@ -216,7 +262,7 @@ def run() -> None:
     settings.validate_model_policy()
     db.init_db()
     server = ThreadingHTTPServer(("0.0.0.0", 8000), YIAIHandler)
-    print("YIAI Center V0.5.5 listening on 0.0.0.0:8000", flush=True)
+    print(f"YIAI Center {PRODUCT_VERSION} listening on 0.0.0.0:8000", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

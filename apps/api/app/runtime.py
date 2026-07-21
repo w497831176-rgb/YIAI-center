@@ -69,6 +69,33 @@ def agent_by_id(config: dict[str, Any], agent_id: str) -> dict[str, Any]:
     return matches[0]
 
 
+def released_skills(config: dict[str, Any], agent_id: str) -> list[dict[str, Any]]:
+    return [
+        skill
+        for skill in config.get("skills", [])
+        if agent_id in skill.get("agent_ids", [])
+    ]
+
+
+def skill_prompt(skills: list[dict[str, Any]]) -> str:
+    if not skills:
+        return ""
+    blocks = []
+    for skill in skills:
+        blocks.append(
+            "\n".join(
+                (
+                    f"Skill：{skill['name']}（不可变版本 {skill['skill_version_id']}）",
+                    f"适用条件：{skill['applicability']}",
+                    f"不适用条件：{skill['non_applicability']}",
+                    f"执行正文：\n{skill['content']}",
+                    f"输出要求：{skill['output_requirements']}",
+                )
+            )
+        )
+    return "\n\n以下是本 Release 已发布并绑定到你的自然语言 Skill，必须遵循：\n" + "\n\n".join(blocks)
+
+
 def execute_chat(
     conversation_id: str | None, content: str
 ) -> Iterator[str]:
@@ -149,6 +176,29 @@ def execute_chat(
         "agent_selected",
         {"agent_id": agent["id"], "agent_name": agent["name"]},
     )
+    skills = released_skills(run["release_config"], agent["id"])
+    trace(
+        run,
+        "skill_considered",
+        {
+            "agent_id": agent["id"],
+            "published_binding_count": len(skills),
+            "skill_version_ids": [skill["skill_version_id"] for skill in skills],
+        },
+    )
+    for skill in skills:
+        trace(
+            run,
+            "skill_activated",
+            {
+                "skill_id": skill["skill_id"],
+                "skill_version_id": skill["skill_version_id"],
+                "version_number": skill["version_number"],
+                "name": skill["name"],
+                "content_hash": skill["content_hash"],
+                "agent_id": agent["id"],
+            },
+        )
     yield sse("route_decision", route)
     yield sse(
         "agent_selected",
@@ -156,7 +206,13 @@ def execute_chat(
     )
 
     history = db.conversation_history(run["conversation_id"], limit=12)
-    messages = [{"role": "system", "content": agent["system_prompt"]}, *history]
+    messages = [
+        {
+            "role": "system",
+            "content": agent["system_prompt"] + skill_prompt(skills),
+        },
+        *history,
+    ]
     answer_parts: list[str] = []
     final_snap: dict[str, Any] | None = None
     try:

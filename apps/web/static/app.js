@@ -9,6 +9,9 @@ const state = {
   streamTerminal: null,
   run: null,
   releases: [],
+  selectedRelease: null,
+  skills: [],
+  editingSkill: null,
   runs: [],
   selectedRun: null,
   drawerRun: null,
@@ -211,7 +214,7 @@ function employeePage() {
     <p>人机共驾和工单处理将在后续版本接入真实状态与 Tool。</p>
     <div class="scope-card">
       <strong>当前版本诚实边界</strong>
-      <p>V0.5.5 只完成顶层 TAB 与页面骨架，不伪造员工队列、工单结果和人工接管数据。</p>
+      <p>V0.5.6 已完成自然语言 Skill；员工队列、工单结果和人工接管仍不使用假数据占位。</p>
     </div>
   </section>`;
 }
@@ -227,7 +230,7 @@ function releasePanel() {
     </div>
     ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
     <form class="release-form" id="release-form">
-      <label><span>候选版本名</span><input name="version" placeholder="例如 V0.5.5-demo-2" required /></label>
+      <label><span>候选版本名</span><input name="version" placeholder="例如 V0.5.6-demo-2" required /></label>
       <label><span>变更说明</span><input name="summary" placeholder="说明为什么创建这个候选版本" required /></label>
       <button>复制 Active 创建候选</button>
     </form>
@@ -243,18 +246,91 @@ function releasePanel() {
                 release.published_at ? ` · 发布：${formatTime(release.published_at)}` : ""
               }</small>
             </div>
-            ${
-              release.status === "ACTIVE"
-                ? ""
-                : `<button class="secondary" data-release-id="${release.id}" data-release-action="${
-                    release.status === "CANDIDATE" ? "publish" : "rollback"
-                  }">${release.status === "CANDIDATE" ? "人工发布" : "回滚到此版本"}</button>`
-            }
+            <div class="card-actions">
+              <button class="secondary" data-release-detail-id="${release.id}">查看 Diff</button>
+              ${
+                release.status === "ACTIVE"
+                  ? ""
+                  : `<button class="secondary" data-release-id="${release.id}" data-release-action="${
+                      release.status === "CANDIDATE" ? "publish" : "rollback"
+                    }">${release.status === "CANDIDATE" ? "人工发布" : "回滚到此版本"}</button>`
+              }
+            </div>
           </article>`,
         )
         .join("")}
     </div>
+    ${releaseDiff()}
   </div>`;
+}
+
+function releaseDiff() {
+  const detail = state.selectedRelease;
+  if (!detail) return "";
+  const diff = detail.diff || {};
+  return `<section class="detail-card">
+    <div class="detail-card-head"><h3>${escapeHtml(detail.version)} · Release Diff</h3><button class="secondary" data-action="close-release-detail">关闭</button></div>
+    <div class="trace-summary">
+      ${fact("对比 Active", diff.base_release_id || "—")}
+      ${fact("新增 SkillVersion", (diff.skills_added || []).join("、") || "无")}
+      ${fact("移除 SkillVersion", (diff.skills_removed || []).join("、") || "无")}
+      ${fact("未变化 SkillVersion", (diff.skills_unchanged || []).join("、") || "无")}
+    </div>
+  </section>`;
+}
+
+function skillPanel() {
+  const current = state.editingSkill;
+  const version = current?.current_version || {};
+  const checked = new Set(current?.agent_ids || []);
+  return `<div class="platform-content">
+    <div class="section-heading compact">
+      <div><span class="eyebrow">NATURAL LANGUAGE CAPABILITY</span><h1>Skill</h1>
+      <p>保存产生不可变 SkillVersion；校验、绑定并随 Release 发布后才进入运行 Prompt。</p></div>
+      ${current ? `<button class="ghost-button" data-action="new-skill">新建 Skill</button>` : ""}
+    </div>
+    ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
+    <form class="capability-form" id="skill-form">
+      <label><span>名称</span><input name="name" maxlength="80" value="${escapeHtml(current?.name || "")}" required /></label>
+      <label><span>说明</span><input name="description" maxlength="500" value="${escapeHtml(current?.description || "")}" required /></label>
+      <label><span>适用条件</span><textarea name="applicability" rows="2" required>${escapeHtml(version.applicability || current?.applicability || "")}</textarea></label>
+      <label><span>不适用条件</span><textarea name="non_applicability" rows="2" required>${escapeHtml(version.non_applicability || current?.non_applicability || "")}</textarea></label>
+      <label class="full"><span>Skill 正文（完整可读、可编辑）</span><textarea name="content" rows="10" required>${escapeHtml(version.content || "")}</textarea></label>
+      <label class="full"><span>输出要求</span><textarea name="output_requirements" rows="3" required>${escapeHtml(version.output_requirements || current?.output_requirements || "")}</textarea></label>
+      <fieldset class="full"><legend>绑定垂直 Agent</legend>
+        ${[
+          ["general-service", "一般客服"],
+          ["complaint-service", "投诉客服"],
+          ["work-order-service", "工单处理"],
+        ].map(([id, name]) => `<label><input type="checkbox" name="agent_ids" value="${id}" ${checked.has(id) ? "checked" : ""} /> ${name}</label>`).join("")}
+      </fieldset>
+      <div class="form-actions full"><button>${current ? "保存为新版本" : "创建 Draft"}</button>${current ? `<button type="button" class="secondary" data-action="cancel-skill-edit">取消编辑</button>` : ""}</div>
+    </form>
+    <div class="capability-list">
+      ${state.skills.length ? state.skills.map(skillCard).join("") : `<div class="run-empty">还没有 Skill。</div>`}
+    </div>
+  </div>`;
+}
+
+function skillCard(skill) {
+  const version = skill.current_version;
+  return `<article class="capability-card">
+    <div class="capability-card-head"><div><span class="status ${skill.status.toLowerCase()}">${escapeHtml(skill.status)}</span><h3>${escapeHtml(skill.name)}</h3></div><small>v${version.version_number} · ${escapeHtml(version.id)}</small></div>
+    <p>${escapeHtml(skill.description)}</p>
+    <div class="trace-summary">
+      ${fact("绑定 Agent", skill.agent_ids.map((id) => agentName(id)).join("、") || "未绑定")}
+      ${fact("内容 Hash", version.content_hash)}
+      ${fact("版本数", String(skill.versions.length))}
+      ${fact("更新时间", formatTime(skill.updated_at))}
+    </div>
+    ${skill.validation_errors.length ? `<div class="validation-errors">${skill.validation_errors.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</div>` : ""}
+    <details><summary>查看完整 Skill 正文</summary><pre>${escapeHtml(version.content)}</pre></details>
+    <div class="card-actions">
+      <button class="secondary" data-skill-action="edit" data-skill-id="${skill.id}">编辑</button>
+      <button class="secondary" data-skill-action="validate" data-skill-id="${skill.id}">校验</button>
+      <button class="secondary" data-skill-action="disable" data-skill-id="${skill.id}">停用</button>
+    </div>
+  </article>`;
 }
 
 const eventLabels = {
@@ -266,6 +342,8 @@ const eventLabels = {
   router_fallback: "Router 兜底",
   route_decision: "Router 决策",
   agent_selected: "选择垂直 Agent",
+  skill_considered: "检查已发布 Skill",
+  skill_activated: "激活 SkillVersion",
   assistant_response_completed: "客服回答完成",
   done: "Run 完成",
   error: "Run 失败",
@@ -452,16 +530,19 @@ function platformPage() {
       <button data-platform-section="release" class="${
         state.platformSection === "release" ? "active" : ""
       }">Release</button>
+      <button data-platform-section="skills" class="${
+        state.platformSection === "skills" ? "active" : ""
+      }">Skill</button>
       <button data-platform-section="runs" class="${
         state.platformSection === "runs" ? "active" : ""
       }">Run 与 Trace</button>
       <div class="later-list">
         <span>后续版本</span>
-        <p>Agent · Skill · RAG · MCP</p>
+        <p>Agent · RAG · MCP</p>
         <p>Badcase · 成本治理</p>
       </div>
     </aside>
-    ${state.platformSection === "release" ? releasePanel() : runsPanel()}
+    ${state.platformSection === "release" ? releasePanel() : state.platformSection === "skills" ? skillPanel() : runsPanel()}
   </section>`;
 }
 
@@ -545,10 +626,32 @@ function bindEvents() {
     });
   });
   document.querySelector("#release-form")?.addEventListener("submit", createCandidate);
+  document.querySelector("#skill-form")?.addEventListener("submit", saveSkill);
   document.querySelectorAll("[data-release-id]").forEach((button) => {
     button.addEventListener("click", () =>
       changeActive(button.dataset.releaseId, button.dataset.releaseAction),
     );
+  });
+  document.querySelectorAll("[data-release-detail-id]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.selectedRelease = await api(`/api/releases/${button.dataset.releaseDetailId}`);
+      render();
+    });
+  });
+  document.querySelector("[data-action='close-release-detail']")?.addEventListener("click", () => {
+    state.selectedRelease = null;
+    render();
+  });
+  document.querySelectorAll("[data-skill-action]").forEach((button) => {
+    button.addEventListener("click", () => skillAction(button.dataset.skillId, button.dataset.skillAction));
+  });
+  document.querySelector("[data-action='new-skill']")?.addEventListener("click", () => {
+    state.editingSkill = null;
+    render();
+  });
+  document.querySelector("[data-action='cancel-skill-edit']")?.addEventListener("click", () => {
+    state.editingSkill = null;
+    render();
   });
   document.querySelectorAll("[data-run-id]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -565,9 +668,46 @@ async function loadConversations() {
 async function loadPlatform() {
   if (state.platformSection === "release") {
     state.releases = await api("/api/releases");
+  } else if (state.platformSection === "skills") {
+    state.skills = await api("/api/skills");
   } else {
     state.runs = await api("/api/runs");
   }
+}
+
+async function saveSkill(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const payload = {
+    name: form.get("name"),
+    description: form.get("description"),
+    applicability: form.get("applicability"),
+    non_applicability: form.get("non_applicability"),
+    content: form.get("content"),
+    output_requirements: form.get("output_requirements"),
+    agent_ids: form.getAll("agent_ids"),
+  };
+  const editingId = state.editingSkill?.id;
+  await api(editingId ? `/api/skills/${editingId}` : "/api/skills", {
+    method: editingId ? "PUT" : "POST",
+    body: JSON.stringify(payload),
+  });
+  state.editingSkill = null;
+  state.notice = editingId ? "已保存为新的不可变 SkillVersion，需重新校验并发布。" : "Skill Draft 已创建，尚未影响运行。";
+  await loadPlatform();
+  render();
+}
+
+async function skillAction(skillId, action) {
+  if (action === "edit") {
+    state.editingSkill = state.skills.find((item) => item.id === skillId) || null;
+    render();
+    return;
+  }
+  const result = await api(`/api/skills/${skillId}/${action}`, { method: "POST" });
+  state.notice = action === "validate" ? (result.status === "VALIDATED" ? "Skill 校验通过，可进入下一个 Candidate Release。" : "Skill 校验未通过，请查看原因。") : "Skill 已停用；发布下一 Release 后在线运行不再使用。";
+  await loadPlatform();
+  render();
 }
 
 async function createCandidate(event) {
