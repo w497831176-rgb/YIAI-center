@@ -1,6 +1,6 @@
 # YIAI Center 测试用例与自测记录
 
-> 当前版本：V0.5.6  
+> 当前版本：V0.5.7  
 > 文档性质：Living Test Doc（动态测试记忆）  
 > 当前状态：自动自测已完成；产品负责人手动页面体验待执行  
 > 用途：随每个版本维护测试范围、预期、实际结果和证据  
@@ -550,7 +550,45 @@
 - 实际：平台管理新增 Skill 页面，可查看完整正文、编辑、校验、停用和绑定；正文只作为 Prompt 文本注入，不存在脚本执行入口。
 - 状态：数据契约与静态结构通过；视觉和点击体验待产品负责人手动验证。
 
-## 10. 部署隔离与 Git
+## 10. V0.5.7 Git Skill 安全导入
+
+### TC-057-01 公开 URL 与凭据边界
+
+- 实际：只接受无用户名、密码、Query 和 Fragment 的 `https://github.com/{owner}/{repo}` 或 `/tree/{ref}/{path}`。
+- 含凭据 URL 由契约测试拒绝。
+- 状态：通过。
+
+### TC-057-02 纯文本仓库真实导入
+
+- URL：`https://github.com/w497831176-rgb/YIAI-center/tree/main/examples/git-skills/plain`。
+- 固定 commit：`3d8c60c85732e32b618521a8f0ff6ff25666297b`。
+- Attempt：`skillimport_03a7261643c0408cab42be7864c70fe8`。
+- 文件清单：仅 `SKILL.md`；扫描无拒绝项。
+- 结果 Skill：`skill_697bbd6e9d1d4cfd84e730ccafab0c5d`，Draft，0 个 Agent 绑定。
+- 状态：通过。
+
+### TC-057-03 含脚本仓库真实拒绝
+
+- URL：`https://github.com/w497831176-rgb/YIAI-center/tree/main/examples/git-skills/rejected`。
+- Attempt：`skillimport_486b00b9068b40b9b2849e4ca512d5a8`。
+- 文件清单：`SKILL.md`、`scripts/check.py`。
+- 实际：因 `scripts/` 与 `.py` 同时命中拒绝规则，未生成 Skill。
+- 状态：通过。
+
+### TC-057-04 不执行、不绑定、不发布、不泄密
+
+- 实际：下载固定 commit 的 tar.gz，在随机临时目录中手工提取受限目标路径；只读取 UTF-8 文本白名单，未运行 Git Hook、仓库脚本和安装命令。
+- 导入成功仍为未绑定 Draft；Active Release 保持 `V0.5.6-skill-demo`。
+- Attempt 记录有 Git URL、commit、SKILL.md、文件清单和原因，没有临时目录与凭据。
+- 状态：通过。
+
+### TC-057-05 回归与部署
+
+- 12 条 unittest 全部通过；Health 返回 `V0.5.7`；迁移版本为 3。
+- `yiai-center-api-1` 重建后 healthy；`immich_machine_learning` 保持 healthy。
+- 状态：通过。
+
+## 11. 部署隔离与 Git
 
 ### TC-DEP-01 不影响现有容器
 
@@ -577,7 +615,7 @@
 
 状态：通过。
 
-## 11. 待产品负责人手动验证
+## 12. 待产品负责人手动验证
 
 ### MANUAL-01 三个 TAB 视觉与切换
 
@@ -613,7 +651,7 @@
 
 状态：待手动。
 
-## 12. 当前已知问题与说明
+## 13. 当前已知问题与说明
 
 - 目标机 Docker Hub 和 PyPI 经现有代理时连接不稳定，因此最终实现主动取消 Node、Nginx、FastAPI 等外部下载依赖。
 - 容器访问 DeepSeek 需要使用目标机现有的 7890 HTTPS 代理；该配置只写在本项目 `.env`，未修改系统和其他容器。
@@ -621,9 +659,9 @@
 - V0.5.5 没有真实 Skill、RAG、MCP、工单写入、人机共驾、Badcase 页面和成本控制页面；对应测试在后续版本新增。
 - UI 没有经过 Codex 浏览器自动化；这是当前演示项目明确的测试边界。
 
-## 13. V0.5.6 自测结论
+## 14. V0.5.7 自测结论
 
-- V0.5.0—V0.5.6 的后端契约、部署闭环和真实 DeepSeek 主路径通过。
+- V0.5.0—V0.5.7 的后端契约、部署闭环、真实 DeepSeek 主路径与 Git 外部导入通过。
 - 当前容器 healthy，Active Release 为 `V0.5.6-skill-demo`。
 - 可以交给产品负责人进行浏览器手动体验。
 - 手动体验通过前，不把 UI 视觉和交互标记为最终验收完成。

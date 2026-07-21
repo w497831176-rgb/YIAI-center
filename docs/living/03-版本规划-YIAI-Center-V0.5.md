@@ -1,6 +1,6 @@
 # YIAI Center 小步迭代版本规划
 
-> 当前版本：V0.5.6  
+> 当前版本：V0.5.7  
 > 文档视角：产品交付与开发拆解  
 > 文档性质：Living Roadmap（动态路线图），不是固定排期承诺  
 > 用途：把产品全局 Y/N 和架构全局 Y/N 拆成小功能、小版本和真实验收  
@@ -68,7 +68,7 @@
 ## 3. 当前总状态
 
 - V0.5.0 三份全局文档基线：已确认并完成。
-- V0.5.1—V0.5.6：已完成实现、部署和后端自测；V0.5.6 增加自然语言 Skill 的完整发布闭环。
+- V0.5.1—V0.5.7：已完成实现、部署和后端自测；V0.5.7 增加公开 GitHub 纯文本 Skill 的固定 commit 导入与拒绝闭环。
 - 产品代码：已推送到 GitHub `main`；核心实现提交为 `e47ca3f`，Living Docs 在后续提交持续同步。
 - Windows 10 Docker 主机：只读检查完成；独立 Compose `yiai-center` 已部署。
 - DeepSeek API：V4-Flash 非流式、流式和真实运行 Gate 已通过。
@@ -424,7 +424,18 @@
 - 一个包含脚本的测试仓库被拒绝。
 - 失败原因可见。
 
-当前状态：进行中（2026-07-21；正在实现公开 GitHub URL 固定 commit、隔离扫描、拒绝记录与 Draft 导入）。
+当前状态：已完成（2026-07-21）。
+
+真实证据：
+
+- 第三号前向迁移建立 `skill_import_attempts`，保留原 SQLite 和全部历史 Run。
+- 12 条标准库契约测试通过，其中 5 条覆盖 URL、凭据拒绝、纯文本、脚本拒绝和来源持久化。
+- 真实成功导入：`skillimport_03a7261643c0408cab42be7864c70fe8`，Git 源为本仓库 `examples/git-skills/plain`，固定 commit `3d8c60c85732e32b618521a8f0ff6ff25666297b`，文件清单只有 `SKILL.md`。
+- 成功导入生成 Skill `skill_697bbd6e9d1d4cfd84e730ccafab0c5d`，状态为 Draft、绑定 Agent 数为 0，未改变 Active Release。
+- 真实拒绝：`skillimport_486b00b9068b40b9b2849e4ca512d5a8`，同一 commit 下文件清单为 `SKILL.md` 与 `scripts/check.py`，因 scripts 目录和 `.py` 扩展名整次拒绝。
+- 临时隔离目录使用完成即清理；持久化记录没有临时路径、Git Token 或凭据。
+
+未完成：浏览器视觉与表单交互体验交由产品负责人手动验证。
 
 ## 12. V0.5.8——RAG 引擎与三篇通用长文档
 
