@@ -7,6 +7,7 @@ WORKDIR /app
 COPY apps/api/app ./app
 COPY apps/api/tests ./tests
 COPY apps/web/static ./static
+COPY examples ./examples
 
 EXPOSE 8000
 CMD ["python", "-m", "app.main"]

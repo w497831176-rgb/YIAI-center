@@ -2,7 +2,7 @@
 
 领域无关的 AI 能力装配、运行解释、质量治理和成本治理演示平台。
 
-当前版本：V0.5.7
+当前版本：V0.5.8
 
 已经实现：
 
@@ -16,6 +16,7 @@
 - 一般客服、投诉客服、工单处理三个默认 Agent。
 - 自然语言 Skill 的完整创建、编辑、校验、停用、Agent 绑定、不可变 SkillVersion、Release Diff 与运行 Trace。
 - 公开 GitHub URL 导入纯文本 Skill：固定 commit、隔离扫描、脚本/可执行内容拒绝，成功后仍是未绑定 Draft。
+- RAG 文档粘贴、确定性 Markdown 切片、不可变 RAGVersion、SQLite FTS5/BM25 关键词检索、本地 TF-IDF/LSA 潜语义向量、加权 RRF 混合检索、真实引用、Agent 绑定、Release Diff 与历史 Trace 快照。
 
 尚未实现的后续能力会在页面中明确标为“后续版本”，不会用假功能占位。
 

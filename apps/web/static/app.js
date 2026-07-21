@@ -13,6 +13,10 @@ const state = {
   skills: [],
   skillImports: [],
   editingSkill: null,
+  ragDocuments: [],
+  ragPreview: null,
+  ragQueryResult: null,
+  ragDraft: { name: "", tags: ["服务", "规则"], version_note: "", content: "", agent_ids: ["general-service"] },
   runs: [],
   selectedRun: null,
   drawerRun: null,
@@ -276,6 +280,9 @@ function releaseDiff() {
       ${fact("新增 SkillVersion", (diff.skills_added || []).join("、") || "无")}
       ${fact("移除 SkillVersion", (diff.skills_removed || []).join("、") || "无")}
       ${fact("未变化 SkillVersion", (diff.skills_unchanged || []).join("、") || "无")}
+      ${fact("新增 RAGVersion", (diff.rag_added || []).join("、") || "无")}
+      ${fact("移除 RAGVersion", (diff.rag_removed || []).join("、") || "无")}
+      ${fact("未变化 RAGVersion", (diff.rag_unchanged || []).join("、") || "无")}
     </div>
   </section>`;
 }
@@ -353,6 +360,69 @@ function skillCard(skill) {
   </article>`;
 }
 
+function ragPanel() {
+  const preview = state.ragPreview;
+  const tested = state.ragQueryResult;
+  const draft = state.ragDraft;
+  return `<div class="platform-content">
+    <div class="section-heading compact">
+      <div><span class="eyebrow">RETRIEVAL AUGMENTED GENERATION</span><h1>RAG</h1>
+      <p>粘贴纯文本或 Markdown，先预览确定性切片，再用 SQLite FTS5/BM25 与本地 TF-IDF/LSA 向量进行真实混合检索。校验并随 Release 发布后才进入运行。</p></div>
+    </div>
+    ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
+    <form class="capability-form" id="rag-form">
+      <label><span>文档名称</span><input name="name" maxlength="100" value="${escapeHtml(draft.name)}" required /></label>
+      <label><span>标签（逗号分隔）</span><input name="tags" value="${escapeHtml(draft.tags.join(","))}" required /></label>
+      <label class="full"><span>版本说明</span><input name="version_note" maxlength="300" value="${escapeHtml(draft.version_note)}" required /></label>
+      <label class="full"><span>原始纯文本 / Markdown</span><textarea name="content" rows="14" minlength="500" required>${escapeHtml(draft.content)}</textarea></label>
+      <fieldset class="full"><legend>绑定垂直 Agent</legend>
+        ${[["general-service", "一般客服"], ["complaint-service", "投诉客服"], ["work-order-service", "工单处理"]]
+          .map(([id, name]) => `<label><input type="checkbox" name="agent_ids" value="${id}" ${draft.agent_ids.includes(id) ? "checked" : ""} /> ${name}</label>`).join("")}
+      </fieldset>
+      <div class="form-actions full"><button type="button" class="secondary" data-action="preview-rag">预览切片</button><button>保存并建立索引</button></div>
+    </form>
+    ${preview ? `<section class="detail-card"><h3>切片预览 · ${preview.chunk_count} 段</h3>
+      <p>${escapeHtml(preview.keyword_engine)} · ${escapeHtml(preview.embedding_model)} · ${escapeHtml(preview.fusion.name)}</p>
+      ${preview.chunks.map((item) => `<details><summary>#${item.ordinal} ${escapeHtml(item.heading)} · ${item.char_count} 字</summary><pre>${escapeHtml(item.content)}</pre></details>`).join("")}</section>` : ""}
+    <div class="capability-list">
+      ${state.ragDocuments.length ? state.ragDocuments.map(ragCard).join("") : `<div class="run-empty">还没有 RAG 文档。</div>`}
+    </div>
+    ${tested ? `<section class="detail-card"><h3>真实混合检索结果</h3>
+      <p>${escapeHtml(tested.technology.keyword_engine)} · ${escapeHtml(tested.technology.embedding_model)} · ${escapeHtml(tested.technology.fusion.name)}</p>
+      ${ragResultColumn("关键词 BM25", tested.keyword_results)}
+      ${ragResultColumn("本地 LSA 向量", tested.vector_results)}
+      ${ragResultColumn("加权 RRF 混合", tested.hybrid_results)}
+    </section>` : ""}
+  </div>`;
+}
+
+function ragResultColumn(title, items) {
+  return `<div class="import-results"><h3>${escapeHtml(title)}</h3>${items.length ? items.map((item) => `<article>
+    <strong>${escapeHtml(item.heading)} · ${escapeHtml(item.chunk_id)}</strong>
+    <p>BM25=${item.keyword_score ?? "—"} · Vector=${item.vector_score ?? "—"} · Hybrid=${item.hybrid_score ?? "—"}</p>
+    <p>${escapeHtml(item.content)}</p><code>${escapeHtml(item.citation)}</code>
+  </article>`).join("") : `<p>无召回；系统不会生成引用。</p>`}</div>`;
+}
+
+function ragCard(document) {
+  const version = document.current_version;
+  return `<article class="capability-card">
+    <div class="capability-card-head"><div><span class="status ${document.status.toLowerCase()}">${escapeHtml(document.status)}</span><h3>${escapeHtml(document.name)}</h3></div><small>v${version.version_number} · ${escapeHtml(version.id)}</small></div>
+    <div class="trace-summary">
+      ${fact("标签", document.tags.join("、"))}
+      ${fact("绑定 Agent", document.agent_ids.map((id) => agentName(id)).join("、"))}
+      ${fact("切片", String(version.chunks.length))}
+      ${fact("关键词", version.keyword_engine)}
+      ${fact("向量", version.embedding_model)}
+      ${fact("原文 Hash", version.original_content_hash)}
+    </div>
+    ${document.validation_errors.length ? `<div class="validation-errors">${document.validation_errors.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</div>` : ""}
+    <details><summary>查看原文与全部切片</summary><pre>${escapeHtml(version.original_content)}</pre>${version.chunks.map((item) => `<pre>${escapeHtml(item.content)}</pre>`).join("")}</details>
+    <form class="import-form rag-query-form" data-rag-version-id="${version.id}"><label><span>检索测试</span><input name="query" required placeholder="输入一个可人工核对的问题" /></label><button>比较三路结果</button></form>
+    <div class="card-actions"><button class="secondary" data-rag-action="validate" data-rag-id="${document.id}">校验</button><button class="secondary" data-rag-action="disable" data-rag-id="${document.id}">停用</button></div>
+  </article>`;
+}
+
 const eventLabels = {
   run_started: "Run 开始",
   user_message_received: "收到用户请求",
@@ -364,6 +434,9 @@ const eventLabels = {
   agent_selected: "选择垂直 Agent",
   skill_considered: "检查已发布 Skill",
   skill_activated: "激活 SkillVersion",
+  rag_retrieval_requested: "RAG 检索请求",
+  rag_retrieval_completed: "RAG 关键词 / 向量 / 混合召回",
+  rag_citation_validation: "RAG 引用校验",
   assistant_response_completed: "客服回答完成",
   done: "Run 完成",
   error: "Run 失败",
@@ -553,16 +626,19 @@ function platformPage() {
       <button data-platform-section="skills" class="${
         state.platformSection === "skills" ? "active" : ""
       }">Skill</button>
+      <button data-platform-section="rag" class="${
+        state.platformSection === "rag" ? "active" : ""
+      }">RAG</button>
       <button data-platform-section="runs" class="${
         state.platformSection === "runs" ? "active" : ""
       }">Run 与 Trace</button>
       <div class="later-list">
         <span>后续版本</span>
-        <p>Agent · RAG · MCP</p>
+        <p>Agent · MCP</p>
         <p>Badcase · 成本治理</p>
       </div>
     </aside>
-    ${state.platformSection === "release" ? releasePanel() : state.platformSection === "skills" ? skillPanel() : runsPanel()}
+    ${state.platformSection === "release" ? releasePanel() : state.platformSection === "skills" ? skillPanel() : state.platformSection === "rag" ? ragPanel() : runsPanel()}
   </section>`;
 }
 
@@ -648,6 +724,14 @@ function bindEvents() {
   document.querySelector("#release-form")?.addEventListener("submit", createCandidate);
   document.querySelector("#skill-form")?.addEventListener("submit", saveSkill);
   document.querySelector("#skill-import-form")?.addEventListener("submit", importSkill);
+  document.querySelector("#rag-form")?.addEventListener("submit", saveRagDocument);
+  document.querySelector("[data-action='preview-rag']")?.addEventListener("click", previewRagDocument);
+  document.querySelectorAll("[data-rag-action]").forEach((button) => {
+    button.addEventListener("click", () => ragAction(button.dataset.ragId, button.dataset.ragAction));
+  });
+  document.querySelectorAll(".rag-query-form").forEach((form) => {
+    form.addEventListener("submit", testRagRetrieval);
+  });
   document.querySelectorAll("[data-release-id]").forEach((button) => {
     button.addEventListener("click", () =>
       changeActive(button.dataset.releaseId, button.dataset.releaseAction),
@@ -694,9 +778,72 @@ async function loadPlatform() {
       api("/api/skills"),
       api("/api/skill-imports"),
     ]);
+  } else if (state.platformSection === "rag") {
+    state.ragDocuments = await api("/api/rag/documents");
   } else {
     state.runs = await api("/api/runs");
   }
+}
+
+function ragFormPayload(formElement) {
+  const form = new FormData(formElement);
+  return {
+    name: form.get("name"),
+    tags: String(form.get("tags") || "").split(/[,，]/).map((item) => item.trim()).filter(Boolean),
+    version_note: form.get("version_note"),
+    content: form.get("content"),
+    agent_ids: form.getAll("agent_ids"),
+  };
+}
+
+async function previewRagDocument() {
+  const form = document.querySelector("#rag-form");
+  if (!form?.reportValidity()) return;
+  const payload = ragFormPayload(form);
+  state.ragDraft = payload;
+  state.ragPreview = await api("/api/rag/preview", {
+    method: "POST",
+    body: JSON.stringify({ content: payload.content }),
+  });
+  state.notice = `预览完成：${state.ragPreview.chunk_count} 个确定性切片；尚未保存或发布。`;
+  render();
+}
+
+async function saveRagDocument(event) {
+  event.preventDefault();
+  await api("/api/rag/documents", {
+    method: "POST",
+    body: JSON.stringify(ragFormPayload(event.currentTarget)),
+  });
+  state.ragPreview = null;
+  state.ragDraft = { name: "", tags: ["服务", "规则"], version_note: "", content: "", agent_ids: ["general-service"] };
+  state.notice = "RAG Draft 与本地索引已创建；校验并发布前不会影响在线运行。";
+  await loadPlatform();
+  render();
+}
+
+async function ragAction(documentId, action) {
+  const result = await api(`/api/rag/documents/${documentId}/${action}`, { method: "POST" });
+  state.notice = action === "validate"
+    ? (result.status === "VALIDATED" ? "RAG 校验通过，可进入下一候选 Release。" : "RAG 校验未通过，请查看原因。")
+    : "RAG 已停用；发布下一 Release 后在线运行不再使用。";
+  await loadPlatform();
+  render();
+}
+
+async function testRagRetrieval(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  state.ragQueryResult = await api("/api/rag/retrieve", {
+    method: "POST",
+    body: JSON.stringify({
+      rag_version_id: event.currentTarget.dataset.ragVersionId,
+      query: form.get("query"),
+      limit: 5,
+    }),
+  });
+  state.notice = "已分别执行真实 BM25、真实本地 LSA 向量与加权 RRF 混合检索。";
+  render();
 }
 
 async function importSkill(event) {

@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import db
+from . import db, rag
 from .config import PRODUCT_VERSION, settings
 from .git_skill_import import GitSkillImportError, import_public_github_skill
 from .runtime import execute_chat, sse
@@ -19,7 +19,7 @@ STATIC_ROOT = Path(__file__).resolve().parent.parent / "static"
 
 
 class YIAIHandler(BaseHTTPRequestHandler):
-    server_version = "YIAI-Center/0.5.7"
+    server_version = "YIAI-Center/0.5.8"
 
     def log_message(self, format_string: str, *args) -> None:
         print(
@@ -104,6 +104,8 @@ class YIAIHandler(BaseHTTPRequestHandler):
                 self._send_json(db.list_skills())
             elif path == "/api/skill-imports":
                 self._send_json(db.list_skill_import_attempts())
+            elif path == "/api/rag/documents":
+                self._send_json(rag.list_documents())
             elif path == "/api/runs":
                 query = parse_qs(parsed.query)
                 limit = max(1, min(200, int(query.get("limit", ["50"])[0])))
@@ -124,6 +126,12 @@ class YIAIHandler(BaseHTTPRequestHandler):
                     self._send_json(db.get_skill(skill_id))
                 except KeyError:
                     self._send_json({"detail": "Skill not found"}, 404)
+            elif re.fullmatch(r"/api/rag/documents/[^/]+", path):
+                document_id = path.removeprefix("/api/rag/documents/")
+                try:
+                    self._send_json(rag.get_document(document_id))
+                except KeyError:
+                    self._send_json({"detail": "RAG document not found"}, 404)
             elif re.fullmatch(r"/api/releases/[^/]+", path):
                 release_id = path.removeprefix("/api/releases/")
                 try:
@@ -153,6 +161,28 @@ class YIAIHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/skills":
                 self._send_json(db.save_skill(self._read_json()), 201)
+                return
+            if path == "/api/rag/preview":
+                payload = self._read_json()
+                content = str(payload.get("content", ""))
+                if not content or len(content) > 100_000:
+                    raise ValueError("Invalid RAG content")
+                self._send_json(rag.preview_document(content))
+                return
+            if path == "/api/rag/documents":
+                self._send_json(rag.save_document(self._read_json()), 201)
+                return
+            if path == "/api/rag/retrieve":
+                payload = self._read_json()
+                version_id = str(payload.get("rag_version_id", "")).strip()
+                query = str(payload.get("query", "")).strip()
+                limit = max(1, min(20, int(payload.get("limit", 5))))
+                if not version_id or not query or len(query) > 2000:
+                    raise ValueError("Invalid retrieval test")
+                try:
+                    self._send_json(rag.retrieve(version_id, query, limit))
+                except KeyError:
+                    self._send_json({"detail": "RAG version not found"}, 404)
                 return
             if path == "/api/skill-imports":
                 payload = self._read_json()
@@ -208,6 +238,19 @@ class YIAIHandler(BaseHTTPRequestHandler):
                 except KeyError:
                     self._send_json({"detail": "Skill not found"}, 404)
                 return
+            rag_action = re.fullmatch(r"/api/rag/documents/([^/]+)/(validate|disable)", path)
+            if rag_action:
+                document_id, action = rag_action.groups()
+                try:
+                    result = (
+                        rag.validate_document(document_id)
+                        if action == "validate"
+                        else rag.disable_document(document_id)
+                    )
+                    self._send_json(result)
+                except KeyError:
+                    self._send_json({"detail": "RAG document not found"}, 404)
+                return
             if path == "/api/releases/candidates":
                 payload = self._read_json()
                 version = str(payload.get("version", "")).strip()
@@ -237,6 +280,18 @@ class YIAIHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         path = urlparse(self.path).path
+        rag_match = re.fullmatch(r"/api/rag/documents/([^/]+)", path)
+        if rag_match:
+            try:
+                self._send_json(rag.save_document(self._read_json(), rag_match.group(1)))
+            except KeyError:
+                self._send_json({"detail": "RAG document not found"}, 404)
+            except (ValueError, json.JSONDecodeError):
+                self._send_json({"detail": "Invalid request"}, 400)
+            except Exception as exc:
+                print(f"PUT {path} failed: {type(exc).__name__}", flush=True)
+                self._send_json({"detail": "Internal error"}, 500)
+            return
         match = re.fullmatch(r"/api/skills/([^/]+)", path)
         if not match:
             self._send_json({"detail": "Not found"}, 404)

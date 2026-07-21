@@ -5,7 +5,7 @@ import re
 import time
 from typing import Any, Iterator
 
-from . import db
+from . import db, rag
 from .deepseek import DeepSeekAdapter
 
 
@@ -199,6 +199,48 @@ def execute_chat(
                 "agent_id": agent["id"],
             },
         )
+    trace(
+        run,
+        "rag_retrieval_requested",
+        {
+            "agent_id": agent["id"],
+            "query": content,
+            "release_id": run["release_id"],
+            "published_rag_version_ids": [
+                item["rag_version_id"]
+                for item in run["release_config"].get("rag", [])
+                if agent["id"] in item.get("agent_ids", [])
+            ],
+        },
+    )
+    rag_result = rag.retrieve_release(run["release_config"], agent["id"], content)
+    trace(
+        run,
+        "rag_retrieval_completed",
+        {
+            **rag_result,
+            "evidence": [
+                {
+                    "document_id": item["document_id"],
+                    "document_name": item["document_name"],
+                    "rag_version_id": item["rag_version_id"],
+                    "chunk_id": item["chunk_id"],
+                    "heading": item["heading"],
+                    "keyword_score": item["keyword_score"],
+                    "vector_score": item["vector_score"],
+                    "hybrid_score": item["hybrid_score"],
+                    "citation": item["citation"],
+                    "content_hash": item["content_hash"],
+                    "content_length": len(item["content"]),
+                    "content": item["content"],
+                }
+                for item in rag_result["evidence"]
+            ],
+            "release_id": run["release_id"],
+            "release_version": run["release_version"],
+            "model_api_cost": 0,
+        },
+    )
     yield sse("route_decision", route)
     yield sse(
         "agent_selected",
@@ -209,7 +251,7 @@ def execute_chat(
     messages = [
         {
             "role": "system",
-            "content": agent["system_prompt"] + skill_prompt(skills),
+            "content": agent["system_prompt"] + skill_prompt(skills) + rag.prompt_context(rag_result),
         },
         *history,
     ]
@@ -228,7 +270,6 @@ def execute_chat(
         for item in adapter.stream(messages):
             if item["kind"] == "delta":
                 answer_parts.append(item["content"])
-                yield sse("delta", {"content": item["content"]})
             elif item["kind"] == "result":
                 final_snap = item["snap"]
         if final_snap is None:
@@ -243,7 +284,20 @@ def execute_chat(
                 "usage_status": final_snap["usage_status"],
             },
         )
-        answer = "".join(answer_parts)
+        answer, used_citations, removed_citations = rag.sanitize_citations(
+            "".join(answer_parts), rag_result["citations"]
+        )
+        trace(
+            run,
+            "rag_citation_validation",
+            {
+                "allowed_citations": rag_result["citations"],
+                "used_citations": used_citations,
+                "removed_unknown_citations": removed_citations,
+            },
+        )
+        for index in range(0, len(answer), 96):
+            yield sse("delta", {"content": answer[index : index + 96]})
         latency_ms = round((time.perf_counter() - started) * 1000)
         result = db.finish_run(
             run["run_id"],
@@ -284,6 +338,12 @@ def execute_chat(
                 ),
                 "completion_tokens": final_snap.get("completion_tokens"),
                 "usage_status": final_snap["usage_status"],
+            },
+            "rag": {
+                "evidence_count": len(rag_result["evidence"]),
+                "citations": rag_result["citations"],
+                "used_citations": used_citations,
+                "injected_char_count": rag_result["injected_char_count"],
             },
         }
         trace(run, "done", done_payload)

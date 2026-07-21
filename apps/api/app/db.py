@@ -189,6 +189,55 @@ ON skill_import_attempts(created_at DESC);
 """
 
 
+MIGRATION_4 = """
+CREATE TABLE IF NOT EXISTS rag_documents (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    tags_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('DRAFT','VALIDATED','DISABLED')),
+    current_version_id TEXT NOT NULL,
+    agent_ids_json TEXT NOT NULL,
+    validation_errors_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rag_versions (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES rag_documents(id),
+    version_number INTEGER NOT NULL,
+    original_content TEXT NOT NULL,
+    original_content_hash TEXT NOT NULL,
+    version_note TEXT NOT NULL,
+    chunker_json TEXT NOT NULL,
+    keyword_engine TEXT NOT NULL,
+    embedding_model TEXT NOT NULL,
+    fusion_json TEXT NOT NULL,
+    model_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(document_id, version_number)
+);
+CREATE TABLE IF NOT EXISTS rag_chunks (
+    id TEXT PRIMARY KEY,
+    rag_version_id TEXT NOT NULL REFERENCES rag_versions(id),
+    ordinal INTEGER NOT NULL,
+    heading TEXT NOT NULL,
+    content TEXT NOT NULL,
+    search_text TEXT NOT NULL,
+    vector_json TEXT NOT NULL,
+    char_count INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    UNIQUE(rag_version_id, ordinal)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts USING fts5(
+    chunk_id UNINDEXED,
+    content,
+    tokenize='unicode61'
+);
+CREATE INDEX IF NOT EXISTS idx_rag_versions_document ON rag_versions(document_id, version_number DESC);
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_version ON rag_chunks(rag_version_id, ordinal);
+"""
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "router": {
         "id": "router-default",
@@ -230,6 +279,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
     },
     "skills": [],
+    "rag": [],
 }
 
 
@@ -255,6 +305,13 @@ def init_db() -> None:
             conn.executescript(MIGRATION_3)
             conn.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(3, ?)",
+                (now_iso(),),
+            )
+            applied.add(3)
+        if 4 not in applied:
+            conn.executescript(MIGRATION_4)
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(4, ?)",
                 (now_iso(),),
             )
         count = conn.execute("SELECT COUNT(*) AS n FROM releases").fetchone()["n"]
@@ -685,6 +742,37 @@ def _candidate_config(conn: sqlite3.Connection, active_config: dict[str, Any]) -
         }
         for row in rows
     ]
+    rag_rows = conn.execute(
+        """
+        SELECT d.id AS document_id, d.name, d.tags_json, d.agent_ids_json, v.*
+        FROM rag_documents d JOIN rag_versions v ON v.id=d.current_version_id
+        WHERE d.status='VALIDATED' ORDER BY d.created_at, d.id
+        """
+    ).fetchall()
+    config["rag"] = [
+        {
+            "document_id": row["document_id"],
+            "rag_version_id": row["id"],
+            "version_number": row["version_number"],
+            "name": row["name"],
+            "tags": json.loads(row["tags_json"]),
+            "version_note": row["version_note"],
+            "original_content_hash": row["original_content_hash"],
+            "chunker": json.loads(row["chunker_json"]),
+            "keyword_engine": row["keyword_engine"],
+            "embedding_model": row["embedding_model"],
+            "fusion": json.loads(row["fusion_json"]),
+            "agent_ids": json.loads(row["agent_ids_json"]),
+            "chunk_ids": [
+                item["id"]
+                for item in conn.execute(
+                    "SELECT id FROM rag_chunks WHERE rag_version_id=? ORDER BY ordinal",
+                    (row["id"],),
+                ).fetchall()
+            ],
+        }
+        for row in rag_rows
+    ]
     return config
 
 
@@ -702,6 +790,19 @@ def _save_release_bindings(conn: sqlite3.Connection, release_id: str, config: di
                     json.dumps(skill, ensure_ascii=False),
                 ),
             )
+    for document in config.get("rag", []):
+        for agent_id in document.get("agent_ids", []):
+            conn.execute(
+                """
+                INSERT INTO release_bindings(
+                    release_id, capability_type, component_version_id, agent_id, config_json
+                ) VALUES(?, 'RAG', ?, ?, ?)
+                """,
+                (
+                    release_id, document["rag_version_id"], agent_id,
+                    json.dumps(document, ensure_ascii=False),
+                ),
+            )
 
 
 def get_release_detail(release_id: str) -> dict[str, Any]:
@@ -715,11 +816,16 @@ def get_release_detail(release_id: str) -> dict[str, Any]:
         return {str(item[id_key]) for item in config.get(key, [])}
     target_skills = ids(target["config"], "skills", "skill_version_id")
     active_skills = ids(active["config"], "skills", "skill_version_id")
+    target_rag = ids(target["config"], "rag", "rag_version_id")
+    active_rag = ids(active["config"], "rag", "rag_version_id")
     target["diff"] = {
         "base_release_id": active_id,
         "skills_added": sorted(target_skills - active_skills),
         "skills_removed": sorted(active_skills - target_skills),
         "skills_unchanged": sorted(target_skills & active_skills),
+        "rag_added": sorted(target_rag - active_rag),
+        "rag_removed": sorted(active_rag - target_rag),
+        "rag_unchanged": sorted(target_rag & active_rag),
     }
     return target
 

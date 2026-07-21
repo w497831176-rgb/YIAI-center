@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 
 
-PRODUCT_VERSION = "V0.5.7"
+PRODUCT_VERSION = "V0.5.8"
 
 
 @dataclass(frozen=True)
