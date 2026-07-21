@@ -559,6 +559,69 @@ main {
   align-items: end;
 }
 
+.import-form {
+  margin: 18px 0;
+  padding: 14px;
+  border: 1px solid #cfe3dd;
+  border-radius: 12px;
+  background: #f2faf7;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.import-form label span {
+  display: block;
+  margin-bottom: 5px;
+  color: #657084;
+  font-size: 11px;
+}
+
+.import-form input {
+  width: 100%;
+  border: 1px solid #cfd9e4;
+  border-radius: 9px;
+  padding: 10px 12px;
+}
+
+.import-form button {
+  border: 0;
+  border-radius: 9px;
+  padding: 11px 15px;
+  background: #218069;
+  color: white;
+  font-weight: 700;
+}
+
+.import-results {
+  margin: 0 0 20px;
+}
+
+.import-results article {
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid #e1e7ee;
+  border-radius: 10px;
+  background: #fafbfc;
+}
+
+.import-results strong {
+  margin-left: 8px;
+  overflow-wrap: anywhere;
+}
+
+.import-results p {
+  margin: 7px 0 0;
+  color: #778397;
+  font-size: 11px;
+}
+
+.import-results pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .release-form label span {
   display: block;
   font-size: 11px;
@@ -1074,7 +1137,8 @@ main {
 
   .release-form,
   .runs-grid,
-  .capability-form {
+  .capability-form,
+  .import-form {
     grid-template-columns: 1fr;
   }
 

@@ -171,6 +171,24 @@ CREATE INDEX IF NOT EXISTS idx_release_bindings_release ON release_bindings(rele
 """
 
 
+MIGRATION_3 = """
+CREATE TABLE IF NOT EXISTS skill_import_attempts (
+    id TEXT PRIMARY KEY,
+    repo_url TEXT NOT NULL,
+    commit_sha TEXT,
+    skill_path TEXT,
+    status TEXT NOT NULL CHECK(status IN ('IMPORTED','REJECTED','FAILED')),
+    file_list_json TEXT NOT NULL,
+    findings_json TEXT NOT NULL,
+    reason TEXT,
+    skill_id TEXT REFERENCES skills(id),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skill_import_attempts_created
+ON skill_import_attempts(created_at DESC);
+"""
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "router": {
         "id": "router-default",
@@ -230,6 +248,13 @@ def init_db() -> None:
             conn.executescript(MIGRATION_2)
             conn.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(2, ?)",
+                (now_iso(),),
+            )
+            applied.add(2)
+        if 3 not in applied:
+            conn.executescript(MIGRATION_3)
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(3, ?)",
                 (now_iso(),),
             )
         count = conn.execute("SELECT COUNT(*) AS n FROM releases").fetchone()["n"]
@@ -450,7 +475,12 @@ def _skill_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def save_skill(payload: dict[str, Any], skill_id: str | None = None) -> dict[str, Any]:
+def save_skill(
+    payload: dict[str, Any],
+    skill_id: str | None = None,
+    source_type: str = "MANUAL",
+    source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     values = _skill_payload(payload)
     timestamp = now_iso()
     with connection() as conn:
@@ -507,12 +537,13 @@ def save_skill(payload: dict[str, Any], skill_id: str | None = None) -> dict[str
                 id, skill_id, version_number, name, description, applicability,
                 non_applicability, content, output_requirements, content_hash,
                 source_type, source_json, created_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MANUAL', '{}', ?)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 version_id, skill_id, version_number, values["name"], values["description"],
                 values["applicability"], values["non_applicability"], values["content"],
-                values["output_requirements"], content_hash, timestamp,
+                values["output_requirements"], content_hash, source_type,
+                json.dumps(source or {}, ensure_ascii=False), timestamp,
             ),
         )
     return get_skill(skill_id)
@@ -543,6 +574,61 @@ def list_skills() -> list[dict[str, Any]]:
     with connection() as conn:
         ids = [row["id"] for row in conn.execute("SELECT id FROM skills ORDER BY updated_at DESC")]
     return [get_skill(skill_id) for skill_id in ids]
+
+
+def save_skill_import_attempt(
+    *,
+    repo_url: str,
+    commit_sha: str | None,
+    skill_path: str | None,
+    status: str,
+    file_list: list[str],
+    findings: list[str],
+    reason: str | None,
+    skill_id: str | None = None,
+) -> dict[str, Any]:
+    attempt_id = new_id("skillimport")
+    created_at = now_iso()
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO skill_import_attempts(
+                id, repo_url, commit_sha, skill_path, status, file_list_json,
+                findings_json, reason, skill_id, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                attempt_id, repo_url, commit_sha, skill_path, status,
+                json.dumps(file_list, ensure_ascii=False),
+                json.dumps(findings, ensure_ascii=False), reason, skill_id, created_at,
+            ),
+        )
+    return get_skill_import_attempt(attempt_id)
+
+
+def get_skill_import_attempt(attempt_id: str) -> dict[str, Any]:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM skill_import_attempts WHERE id=?", (attempt_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(attempt_id)
+        result = dict(row)
+        result["file_list"] = json.loads(result.pop("file_list_json"))
+        result["findings"] = json.loads(result.pop("findings_json"))
+        return result
+
+
+def list_skill_import_attempts(limit: int = 50) -> list[dict[str, Any]]:
+    with connection() as conn:
+        ids = [
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM skill_import_attempts ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        ]
+    return [get_skill_import_attempt(attempt_id) for attempt_id in ids]
 
 
 def validate_skill(skill_id: str) -> dict[str, Any]:

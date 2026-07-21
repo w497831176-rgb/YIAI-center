@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import db
 from .config import PRODUCT_VERSION, settings
+from .git_skill_import import GitSkillImportError, import_public_github_skill
 from .runtime import execute_chat, sse
 
 
@@ -18,7 +19,7 @@ STATIC_ROOT = Path(__file__).resolve().parent.parent / "static"
 
 
 class YIAIHandler(BaseHTTPRequestHandler):
-    server_version = "YIAI-Center/0.5.6"
+    server_version = "YIAI-Center/0.5.7"
 
     def log_message(self, format_string: str, *args) -> None:
         print(
@@ -101,6 +102,8 @@ class YIAIHandler(BaseHTTPRequestHandler):
                 self._send_json(db.list_releases())
             elif path == "/api/skills":
                 self._send_json(db.list_skills())
+            elif path == "/api/skill-imports":
+                self._send_json(db.list_skill_import_attempts())
             elif path == "/api/runs":
                 query = parse_qs(parsed.query)
                 limit = max(1, min(200, int(query.get("limit", ["50"])[0])))
@@ -150,6 +153,47 @@ class YIAIHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/skills":
                 self._send_json(db.save_skill(self._read_json()), 201)
+                return
+            if path == "/api/skill-imports":
+                payload = self._read_json()
+                url = str(payload.get("url", "")).strip()
+                if not url or len(url) > 500:
+                    raise ValueError("Invalid Git URL")
+                try:
+                    imported = import_public_github_skill(url)
+                    source = {
+                        key: value
+                        for key, value in imported.items()
+                        if key not in {"skill_payload", "status", "reason"}
+                    }
+                    skill = db.save_skill(
+                        imported["skill_payload"], source_type="GIT", source=source
+                    )
+                    attempt = db.save_skill_import_attempt(
+                        repo_url=imported["repo_url"],
+                        commit_sha=imported["commit_sha"],
+                        skill_path=imported["skill_path"],
+                        status="IMPORTED",
+                        file_list=imported["file_list"],
+                        findings=imported["findings"],
+                        reason=None,
+                        skill_id=skill["id"],
+                    )
+                    self._send_json({"attempt": attempt, "skill": skill}, 201)
+                except GitSkillImportError as exc:
+                    result = exc.result
+                    attempt = db.save_skill_import_attempt(
+                        repo_url=result["repo_url"] or url,
+                        commit_sha=result["commit_sha"],
+                        skill_path=result["skill_path"],
+                        status=result["status"],
+                        file_list=result["file_list"],
+                        findings=result["findings"],
+                        reason=result["reason"],
+                    )
+                    self._send_json(
+                        attempt, 422 if result["status"] == "REJECTED" else 502
+                    )
                 return
             skill_action = re.fullmatch(r"/api/skills/([^/]+)/(validate|disable)", path)
             if skill_action:

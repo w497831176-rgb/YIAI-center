@@ -11,6 +11,7 @@ const state = {
   releases: [],
   selectedRelease: null,
   skills: [],
+  skillImports: [],
   editingSkill: null,
   runs: [],
   selectedRun: null,
@@ -290,6 +291,11 @@ function skillPanel() {
       ${current ? `<button class="ghost-button" data-action="new-skill">新建 Skill</button>` : ""}
     </div>
     ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
+    <form class="import-form" id="skill-import-form">
+      <label><span>公开 GitHub Skill URL</span><input name="url" type="url" placeholder="https://github.com/owner/repo/tree/main/path" required /></label>
+      <button>固定 commit 并安全扫描</button>
+    </form>
+    ${skillImportAttempts()}
     <form class="capability-form" id="skill-form">
       <label><span>名称</span><input name="name" maxlength="80" value="${escapeHtml(current?.name || "")}" required /></label>
       <label><span>说明</span><input name="description" maxlength="500" value="${escapeHtml(current?.description || "")}" required /></label>
@@ -310,6 +316,20 @@ function skillPanel() {
       ${state.skills.length ? state.skills.map(skillCard).join("") : `<div class="run-empty">还没有 Skill。</div>`}
     </div>
   </div>`;
+}
+
+function skillImportAttempts() {
+  if (!state.skillImports.length) return "";
+  return `<section class="import-results"><h3>最近导入与拒绝记录</h3>${state.skillImports
+    .map(
+      (item) => `<article>
+        <div><span class="status ${item.status.toLowerCase()}">${escapeHtml(item.status)}</span><strong>${escapeHtml(item.repo_url)}</strong></div>
+        <p>commit：${escapeHtml(item.commit_sha || "未解析")} · SKILL.md：${escapeHtml(item.skill_path || "未找到")}</p>
+        <details><summary>文件清单（${item.file_list.length}）</summary><pre>${escapeHtml(item.file_list.join("\n") || "无")}</pre></details>
+        <p>${escapeHtml(item.reason || "扫描通过，已导入为未绑定 Draft。")}</p>
+      </article>`,
+    )
+    .join("")}</section>`;
 }
 
 function skillCard(skill) {
@@ -627,6 +647,7 @@ function bindEvents() {
   });
   document.querySelector("#release-form")?.addEventListener("submit", createCandidate);
   document.querySelector("#skill-form")?.addEventListener("submit", saveSkill);
+  document.querySelector("#skill-import-form")?.addEventListener("submit", importSkill);
   document.querySelectorAll("[data-release-id]").forEach((button) => {
     button.addEventListener("click", () =>
       changeActive(button.dataset.releaseId, button.dataset.releaseAction),
@@ -669,10 +690,29 @@ async function loadPlatform() {
   if (state.platformSection === "release") {
     state.releases = await api("/api/releases");
   } else if (state.platformSection === "skills") {
-    state.skills = await api("/api/skills");
+    [state.skills, state.skillImports] = await Promise.all([
+      api("/api/skills"),
+      api("/api/skill-imports"),
+    ]);
   } else {
     state.runs = await api("/api/runs");
   }
+}
+
+async function importSkill(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const response = await fetch("/api/skill-imports", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: form.get("url") }),
+  });
+  const result = await response.json();
+  state.notice = response.ok
+    ? `导入成功并固定 commit ${result.attempt.commit_sha}；Skill 仍是未绑定 Draft。`
+    : result.reason || "导入失败，请查看扫描记录。";
+  await loadPlatform();
+  render();
 }
 
 async function saveSkill(event) {
