@@ -18,7 +18,6 @@ CHUNKER = {
 KEYWORD_ENGINE = "sqlite-fts5-bm25"
 EMBEDDING_MODEL = "local-tfidf-lsa-v1"
 FUSION = {"name": "weighted-rrf", "rrf_k": 60, "keyword_weight": 0.5, "vector_weight": 0.5}
-AGENT_IDS = {"general-service", "complaint-service", "work-order-service"}
 TOKEN_RE = re.compile(r"[\u4e00-\u9fff]+|[a-zA-Z0-9][a-zA-Z0-9_.-]*")
 
 
@@ -256,7 +255,6 @@ def _validation_errors(payload: dict[str, Any], preview: dict[str, Any]) -> list
     content = str(payload.get("content", "")).strip()
     version_note = str(payload.get("version_note", "")).strip()
     tags = payload.get("tags")
-    agent_ids = payload.get("agent_ids")
     if not name or len(name) > 100:
         errors.append("name 必须为 1-100 个字符")
     if len(content) < 500 or len(content) > 100_000:
@@ -267,10 +265,6 @@ def _validation_errors(payload: dict[str, Any], preview: dict[str, Any]) -> list
         errors.append("tags 必须包含 1-12 个标签")
     elif any(not isinstance(item, str) or not item.strip() or len(item) > 30 for item in tags):
         errors.append("每个标签必须为 1-30 个字符")
-    if not isinstance(agent_ids, list) or not agent_ids:
-        errors.append("至少绑定一个垂直 Agent")
-    elif any(item not in AGENT_IDS for item in agent_ids):
-        errors.append("agent_ids 包含未知垂直 Agent")
     if not preview["chunks"]:
         errors.append("切片结果不能为空")
     return errors
@@ -283,7 +277,6 @@ def save_document(payload: dict[str, Any], document_id: str | None = None) -> di
         "content": content,
         "tags": list(dict.fromkeys(str(item).strip() for item in payload.get("tags", []) if str(item).strip())),
         "version_note": str(payload.get("version_note", "")).strip(),
-        "agent_ids": list(dict.fromkeys(payload.get("agent_ids") or [])),
     }
     preview = preview_document(content)
     errors = _validation_errors(values, preview)
@@ -294,6 +287,7 @@ def save_document(payload: dict[str, Any], document_id: str | None = None) -> di
             document_id = db.new_id("ragdoc")
             version_number = 1
             created_at = timestamp
+            legacy_agent_ids: list[str] = []
         else:
             current = conn.execute("SELECT * FROM rag_documents WHERE id=?", (document_id,)).fetchone()
             if current is None:
@@ -303,6 +297,7 @@ def save_document(payload: dict[str, Any], document_id: str | None = None) -> di
                 (document_id,),
             ).fetchone()["n"]
             created_at = current["created_at"]
+            legacy_agent_ids = json.loads(current["agent_ids_json"])
         version_id = db.new_id("ragv")
         original_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         if version_number == 1:
@@ -315,7 +310,7 @@ def save_document(payload: dict[str, Any], document_id: str | None = None) -> di
                 """,
                 (
                     document_id, values["name"], json.dumps(values["tags"], ensure_ascii=False),
-                    version_id, json.dumps(values["agent_ids"], ensure_ascii=False),
+                    version_id, json.dumps(legacy_agent_ids, ensure_ascii=False),
                     json.dumps(errors, ensure_ascii=False), created_at, timestamp,
                 ),
             )
@@ -327,7 +322,7 @@ def save_document(payload: dict[str, Any], document_id: str | None = None) -> di
                 """,
                 (
                     values["name"], json.dumps(values["tags"], ensure_ascii=False), version_id,
-                    json.dumps(values["agent_ids"], ensure_ascii=False),
+                    json.dumps(legacy_agent_ids, ensure_ascii=False),
                     json.dumps(errors, ensure_ascii=False), timestamp, document_id,
                 ),
             )
@@ -391,7 +386,9 @@ def get_document(document_id: str) -> dict[str, Any]:
             raise KeyError(document_id)
         result = dict(row)
         result["tags"] = json.loads(result.pop("tags_json"))
-        result["agent_ids"] = json.loads(result.pop("agent_ids_json"))
+        result["legacy_agent_ids"] = json.loads(result.pop("agent_ids_json"))
+        result["bound_agent_ids"] = db.bound_agent_ids(conn, "RAG", document_id)
+        result["agent_ids"] = list(result["bound_agent_ids"])
         result["validation_errors"] = json.loads(result.pop("validation_errors_json"))
         result["current_version"] = _version_dict(conn, result["current_version_id"])
         result["versions"] = [
@@ -416,7 +413,6 @@ def validate_document(document_id: str) -> dict[str, Any]:
     payload = {
         "name": document["name"], "content": version["original_content"],
         "tags": document["tags"], "version_note": version["version_note"],
-        "agent_ids": document["agent_ids"],
     }
     errors = _validation_errors(payload, preview_document(version["original_content"]))
     with db.connection() as conn:

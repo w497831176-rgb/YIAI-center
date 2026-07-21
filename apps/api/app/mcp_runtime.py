@@ -29,6 +29,15 @@ def matching_servers(config: dict[str, Any], content: str) -> list[dict[str, Any
     return matches
 
 
+def tool_bound_to_agent(server: dict[str, Any], tool_name: str, agent_id: str) -> bool:
+    """Support new per-Tool Agent bindings and historical Server-level snapshots."""
+    tool_agent_ids = server.get("tool_agent_ids")
+    if isinstance(tool_agent_ids, dict):
+        agent_ids = tool_agent_ids.get(tool_name)
+        return isinstance(agent_ids, list) and agent_id in agent_ids
+    return agent_id in server.get("agent_ids", [])
+
+
 def preflight_messages(servers: list[dict[str, Any]], content: str) -> list[dict[str, str]]:
     candidates = []
     for server in servers:

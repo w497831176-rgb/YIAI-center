@@ -1,6 +1,6 @@
 const state = {
   tab: "user",
-  platformSection: "release",
+  platformSection: "agents",
   workspace: null,
   messages: [],
   conversations: [],
@@ -10,13 +10,15 @@ const state = {
   run: null,
   releases: [],
   selectedRelease: null,
+  agents: [],
+  editingAgent: null,
   skills: [],
   skillImports: [],
   editingSkill: null,
   ragDocuments: [],
   ragPreview: null,
   ragQueryResult: null,
-  ragDraft: { name: "", tags: ["服务", "规则"], version_note: "", content: "", agent_ids: ["general-service"] },
+  ragDraft: { name: "", tags: ["服务", "规则"], version_note: "", content: "" },
   mcpServers: [],
   editingMcp: null,
   mcpToolResult: null,
@@ -70,6 +72,8 @@ function displayToken(value) {
 
 function agentName(id, fallback) {
   if (fallback) return fallback;
+  const configured = state.agents.find((item) => item.id === id);
+  if (configured?.name) return configured.name;
   return (
     {
       "general-service": "一般客服",
@@ -238,7 +242,7 @@ function releasePanel() {
     </div>
     ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
     <form class="release-form" id="release-form">
-      <label><span>候选版本名</span><input name="version" placeholder="例如 V0.5.6-demo-2" required /></label>
+      <label><span>候选版本名</span><input name="version" placeholder="例如 V0.5.9-next" required /></label>
       <label><span>变更说明</span><input name="summary" placeholder="说明为什么创建这个候选版本" required /></label>
       <button>复制 Active 创建候选</button>
     </form>
@@ -280,6 +284,10 @@ function releaseDiff() {
     <div class="detail-card-head"><h3>${escapeHtml(detail.version)} · Release Diff</h3><button class="secondary" data-action="close-release-detail">关闭</button></div>
     <div class="trace-summary">
       ${fact("对比 Active", diff.base_release_id || "—")}
+      ${fact("新增 Agent", (diff.agents_added || []).map((id) => agentName(id)).join("、") || "无")}
+      ${fact("移除 Agent", (diff.agents_removed || []).map((id) => agentName(id)).join("、") || "无")}
+      ${fact("基础配置变化 Agent", (diff.agents_changed || []).map((id) => agentName(id)).join("、") || "无")}
+      ${fact("能力绑定变化 Agent", (diff.agent_bindings_changed || []).map((id) => agentName(id)).join("、") || "无")}
       ${fact("新增 SkillVersion", (diff.skills_added || []).join("、") || "无")}
       ${fact("移除 SkillVersion", (diff.skills_removed || []).join("、") || "无")}
       ${fact("未变化 SkillVersion", (diff.skills_unchanged || []).join("、") || "无")}
@@ -291,17 +299,66 @@ function releaseDiff() {
       ${fact("配置变更 MCP Server", (diff.mcp_changed || []).join("、") || "无")}
       ${fact("未变化 MCP Server", (diff.mcp_unchanged || []).join("、") || "无")}
     </div>
+    <details><summary>查看候选 Release 的 Agent 绑定快照</summary><pre>${escapeHtml(JSON.stringify(diff.agent_binding_snapshot || {}, null, 2))}</pre></details>
   </section>`;
+}
+
+function agentPanel() {
+  const current = state.editingAgent || state.agents[0];
+  if (!current) {
+    return `<div class="platform-content"><div class="run-empty">Agent 配置尚未初始化。</div></div>`;
+  }
+  const skillIds = new Set(current.skill_ids || []);
+  const ragIds = new Set(current.rag_document_ids || []);
+  const mcpBindings = new Set(
+    (current.mcp_tool_bindings || []).map((item) => `${item.server_id}::${item.tool_name}`),
+  );
+  const toolIds = new Set(current.tool_ids || []);
+  const validSkills = state.skills.filter((item) => item.status === "VALIDATED");
+  const validRag = state.ragDocuments.filter((item) => item.status === "VALIDATED");
+  const connectedMcp = state.mcpServers.filter((item) => item.status === "CONNECTED");
+  const presetTools = current.available_preset_tools || [];
+  return `<div class="platform-content">
+    <div class="section-heading compact"><div>
+      <span class="eyebrow">VERTICAL AGENT ASSEMBLY</span><h1>Agent 配置</h1>
+      <p>垂直 Agent 是能力装配的唯一入口。这里保存的是草稿，创建候选 Release 并人工发布后才影响新消息。</p>
+    </div></div>
+    ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
+    <div class="agent-selector">
+      ${state.agents.map((agent) => `<button type="button" data-agent-select="${escapeHtml(agent.id)}" class="${agent.id === current.id ? "active" : ""}"><strong>${escapeHtml(agent.name)}</strong><small>${escapeHtml(agent.id)}</small></button>`).join("")}
+    </div>
+    <form class="capability-form" id="agent-form" data-agent-id="${escapeHtml(current.id)}">
+      <label><span>Agent 名称</span><input name="name" maxlength="80" value="${escapeHtml(current.name)}" required /></label>
+      <label><span>稳定 ID</span><input value="${escapeHtml(current.id)}" disabled /></label>
+      <label class="full"><span>业务说明</span><textarea name="description" rows="3" maxlength="500" required>${escapeHtml(current.description)}</textarea></label>
+      <label class="full"><span>System Prompt</span><textarea name="system_prompt" rows="8" maxlength="20000" required>${escapeHtml(current.system_prompt)}</textarea></label>
+      <fieldset class="full binding-group"><legend>Skill</legend>
+        <p>只显示已经校验通过的 Skill；具体不可变版本在创建 Candidate 时固定。</p>
+        ${validSkills.length ? validSkills.map((skill) => `<label><input type="checkbox" name="skill_ids" value="${escapeHtml(skill.id)}" ${skillIds.has(skill.id) ? "checked" : ""} /> <strong>${escapeHtml(skill.name)}</strong><small>${escapeHtml(skill.current_version.id)}</small></label>`).join("") : `<div class="run-empty">暂无已校验 Skill。请先在 Skill 页面创建并校验。</div>`}
+      </fieldset>
+      <fieldset class="full binding-group"><legend>RAG</legend>
+        <p>只显示已经校验通过的 RAG 文档。</p>
+        ${validRag.length ? validRag.map((document) => `<label><input type="checkbox" name="rag_document_ids" value="${escapeHtml(document.id)}" ${ragIds.has(document.id) ? "checked" : ""} /> <strong>${escapeHtml(document.name)}</strong><small>${escapeHtml(document.current_version.id)}</small></label>`).join("") : `<div class="run-empty">暂无已校验 RAG 文档。请先在 RAG 页面创建并校验。</div>`}
+      </fieldset>
+      <fieldset class="full binding-group"><legend>MCP Tool</legend>
+        <p>按 Tool 绑定，而不是把整个 Server 的所有 Tool 一次性交给 Agent。</p>
+        ${connectedMcp.length ? connectedMcp.map((server) => `<div class="binding-server"><strong>${escapeHtml(server.name)}</strong><small>${escapeHtml(server.endpoint)}</small>${(server.allowed_tools || []).map((toolName) => { const key = `${server.id}::${toolName}`; return `<label><input type="checkbox" name="mcp_tool_bindings" value="${escapeHtml(key)}" ${mcpBindings.has(key) ? "checked" : ""} /> ${escapeHtml(toolName)}</label>`; }).join("") || `<div class="run-empty">没有可绑定的只读 Tool。</div>`}</div>`).join("") : `<div class="run-empty">暂无已连接的远程 MCP Server。</div>`}
+      </fieldset>
+      <fieldset class="full binding-group"><legend>预置 Tool</legend>
+        ${presetTools.length ? presetTools.map((tool) => `<label><input type="checkbox" name="tool_ids" value="${escapeHtml(tool.id)}" ${toolIds.has(tool.id) ? "checked" : ""} /> ${escapeHtml(tool.name)}</label>`).join("") : `<div class="run-empty">当前版本没有已登记的预置 Tool，不使用占位 Tool 冒充真实能力。</div>`}
+      </fieldset>
+      <div class="form-actions full"><button>保存 Agent 草稿</button></div>
+    </form>
+  </div>`;
 }
 
 function skillPanel() {
   const current = state.editingSkill;
   const version = current?.current_version || {};
-  const checked = new Set(current?.agent_ids || []);
   return `<div class="platform-content">
     <div class="section-heading compact">
       <div><span class="eyebrow">NATURAL LANGUAGE CAPABILITY</span><h1>Skill</h1>
-      <p>保存产生不可变 SkillVersion；校验、绑定并随 Release 发布后才进入运行 Prompt。</p></div>
+      <p>保存产生不可变 SkillVersion；校验通过后从 Agent 页面装配，并随 Release 发布后进入运行 Prompt。</p></div>
       ${current ? `<button class="ghost-button" data-action="new-skill">新建 Skill</button>` : ""}
     </div>
     ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
@@ -317,13 +374,6 @@ function skillPanel() {
       <label><span>不适用条件</span><textarea name="non_applicability" rows="2" required>${escapeHtml(version.non_applicability || current?.non_applicability || "")}</textarea></label>
       <label class="full"><span>Skill 正文（完整可读、可编辑）</span><textarea name="content" rows="10" required>${escapeHtml(version.content || "")}</textarea></label>
       <label class="full"><span>输出要求</span><textarea name="output_requirements" rows="3" required>${escapeHtml(version.output_requirements || current?.output_requirements || "")}</textarea></label>
-      <fieldset class="full"><legend>绑定垂直 Agent</legend>
-        ${[
-          ["general-service", "一般客服"],
-          ["complaint-service", "投诉客服"],
-          ["work-order-service", "工单处理"],
-        ].map(([id, name]) => `<label><input type="checkbox" name="agent_ids" value="${id}" ${checked.has(id) ? "checked" : ""} /> ${name}</label>`).join("")}
-      </fieldset>
       <div class="form-actions full"><button>${current ? "保存为新版本" : "创建 Draft"}</button>${current ? `<button type="button" class="secondary" data-action="cancel-skill-edit">取消编辑</button>` : ""}</div>
     </form>
     <div class="capability-list">
@@ -340,7 +390,7 @@ function skillImportAttempts() {
         <div><span class="status ${item.status.toLowerCase()}">${escapeHtml(item.status)}</span><strong>${escapeHtml(item.repo_url)}</strong></div>
         <p>commit：${escapeHtml(item.commit_sha || "未解析")} · SKILL.md：${escapeHtml(item.skill_path || "未找到")}</p>
         <details><summary>文件清单（${item.file_list.length}）</summary><pre>${escapeHtml(item.file_list.join("\n") || "无")}</pre></details>
-        <p>${escapeHtml(item.reason || "扫描通过，已导入为未绑定 Draft。")}</p>
+        <p>${escapeHtml(item.reason || "扫描通过，已导入为 Draft；校验后请从 Agent 页面装配。")}</p>
       </article>`,
     )
     .join("")}</section>`;
@@ -352,7 +402,7 @@ function skillCard(skill) {
     <div class="capability-card-head"><div><span class="status ${skill.status.toLowerCase()}">${escapeHtml(skill.status)}</span><h3>${escapeHtml(skill.name)}</h3></div><small>v${version.version_number} · ${escapeHtml(version.id)}</small></div>
     <p>${escapeHtml(skill.description)}</p>
     <div class="trace-summary">
-      ${fact("绑定 Agent", skill.agent_ids.map((id) => agentName(id)).join("、") || "未绑定")}
+      ${fact("使用该 Skill 的 Agent（只读）", (skill.bound_agent_ids || []).map((id) => agentName(id)).join("、") || "暂无")}
       ${fact("内容 Hash", version.content_hash)}
       ${fact("版本数", String(skill.versions.length))}
       ${fact("更新时间", formatTime(skill.updated_at))}
@@ -374,7 +424,7 @@ function ragPanel() {
   return `<div class="platform-content">
     <div class="section-heading compact">
       <div><span class="eyebrow">RETRIEVAL AUGMENTED GENERATION</span><h1>RAG</h1>
-      <p>粘贴纯文本或 Markdown，先预览确定性切片，再用 SQLite FTS5/BM25 与本地 TF-IDF/LSA 向量进行真实混合检索。校验并随 Release 发布后才进入运行。</p></div>
+      <p>粘贴纯文本或 Markdown，先预览确定性切片，再用 SQLite FTS5/BM25 与本地 TF-IDF/LSA 向量进行真实混合检索。校验通过后从 Agent 页面装配。</p></div>
     </div>
     ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
     <form class="capability-form" id="rag-form">
@@ -382,10 +432,6 @@ function ragPanel() {
       <label><span>标签（逗号分隔）</span><input name="tags" value="${escapeHtml(draft.tags.join(","))}" required /></label>
       <label class="full"><span>版本说明</span><input name="version_note" maxlength="300" value="${escapeHtml(draft.version_note)}" required /></label>
       <label class="full"><span>原始纯文本 / Markdown</span><textarea name="content" rows="14" minlength="500" required>${escapeHtml(draft.content)}</textarea></label>
-      <fieldset class="full"><legend>绑定垂直 Agent</legend>
-        ${[["general-service", "一般客服"], ["complaint-service", "投诉客服"], ["work-order-service", "工单处理"]]
-          .map(([id, name]) => `<label><input type="checkbox" name="agent_ids" value="${id}" ${draft.agent_ids.includes(id) ? "checked" : ""} /> ${name}</label>`).join("")}
-      </fieldset>
       <div class="form-actions full"><button type="button" class="secondary" data-action="preview-rag">预览切片</button><button>保存并建立索引</button></div>
     </form>
     ${preview ? `<section class="detail-card"><h3>切片预览 · ${preview.chunk_count} 段</h3>
@@ -417,7 +463,7 @@ function ragCard(document) {
     <div class="capability-card-head"><div><span class="status ${document.status.toLowerCase()}">${escapeHtml(document.status)}</span><h3>${escapeHtml(document.name)}</h3></div><small>v${version.version_number} · ${escapeHtml(version.id)}</small></div>
     <div class="trace-summary">
       ${fact("标签", document.tags.join("、"))}
-      ${fact("绑定 Agent", document.agent_ids.map((id) => agentName(id)).join("、"))}
+      ${fact("使用该 RAG 的 Agent（只读）", (document.bound_agent_ids || []).map((id) => agentName(id)).join("、") || "暂无")}
       ${fact("切片", String(version.chunks.length))}
       ${fact("关键词", version.keyword_engine)}
       ${fact("向量", version.embedding_model)}
@@ -432,7 +478,6 @@ function ragCard(document) {
 
 function mcpPanel() {
   const current = state.editingMcp;
-  const checked = new Set(current?.agent_ids || []);
   const runtimeConfig = current?.runtime_config || {
     activation_keywords: [], business_instructions: "", required_fields: [],
     clarification_prompt: "", default_arguments: {}, result_paths: [],
@@ -440,7 +485,7 @@ function mcpPanel() {
   return `<div class="platform-content">
     <div class="section-heading compact"><div>
       <span class="eyebrow">REMOTE READ-ONLY TOOLS</span><h1>MCP</h1>
-      <p>平台只连接已经运行的 Streamable HTTP Endpoint。连接测试、只读校验、Tool 白名单、Agent 绑定和运行配置随 Release 固定；平台不会下载或安装 MCP。</p>
+      <p>平台只连接已经运行的 Streamable HTTP Endpoint。这里管理连接、只读校验、Tool 白名单和运行配置；Tool 与 Agent 的装配只在 Agent 页面完成。</p>
     </div>${current ? `<button class="ghost-button" data-action="new-mcp">新建 MCP</button>` : ""}</div>
     ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
     <form class="capability-form" id="mcp-form">
@@ -454,10 +499,6 @@ function mcpPanel() {
       <label><span>允许绑定的只读 Tool（逗号或换行）</span><textarea name="allowed_tools" rows="4" required>${escapeHtml((current?.allowed_tools || []).join("\n"))}</textarea></label>
       <label><span>显式只读声明（逗号或换行）</span><textarea name="declared_read_only_tools" rows="4" required>${escapeHtml((current?.declared_read_only_tools || []).join("\n"))}</textarea></label>
       <label class="full"><span>通用运行配置 JSON</span><textarea name="runtime_config" rows="12" required>${escapeHtml(JSON.stringify(runtimeConfig, null, 2))}</textarea></label>
-      <fieldset class="full"><legend>绑定垂直 Agent</legend>
-        ${[["general-service", "一般客服"], ["complaint-service", "投诉客服"], ["work-order-service", "工单处理"]]
-          .map(([id, name]) => `<label><input type="checkbox" name="agent_ids" value="${id}" ${checked.has(id) ? "checked" : ""} /> ${name}</label>`).join("")}
-      </fieldset>
       <div class="form-actions full"><button>${current ? "保存配置" : "创建 Draft"}</button>${current ? `<button type="button" class="secondary" data-action="cancel-mcp-edit">取消编辑</button>` : ""}</div>
     </form>
     <div class="capability-list">${state.mcpServers.length ? state.mcpServers.map(mcpCard).join("") : `<div class="run-empty">还没有 MCP Server。</div>`}</div>
@@ -478,9 +519,10 @@ function mcpCard(server) {
       ${fact("初始化", test.initialize_success === true ? "成功" : test.initialize_success === false ? "失败" : "未测试")}
       ${fact("Tool List", test.tools_list_success === true ? `成功，共 ${test.tool_count} 个` : test.tools_list_success === false ? "失败" : "未测试")}
       ${fact("允许的只读 Tool", (server.allowed_tools || []).join("、"))}
-      ${fact("绑定 Agent", (server.agent_ids || []).map((id) => agentName(id)).join("、") || "未绑定")}
+      ${fact("使用该 Server 的 Agent（只读）", (server.bound_agent_ids || []).map((id) => agentName(id)).join("、") || "暂无")}
       ${fact("所属 Release", refs)}
     </div>
+    <details><summary>Tool 与 Agent 使用关系（只读）</summary><pre>${escapeHtml(JSON.stringify(server.tool_agent_ids || {}, null, 2))}</pre></details>
     ${test.error ? `<div class="validation-errors"><p>${escapeHtml(test.error)}</p></div>` : ""}
     <details><summary>Tool 清单与读写属性</summary><pre>${escapeHtml(JSON.stringify(server.tools || [], null, 2))}</pre></details>
     <details><summary>被拒绝的 Tool（${(server.rejected_tools || []).length}）</summary><pre>${escapeHtml(JSON.stringify(server.rejected_tools || [], null, 2))}</pre></details>
@@ -719,6 +761,9 @@ function platformPage() {
   return `<section class="platform-layout">
     <aside class="side-nav">
       <span class="eyebrow">CONTROL PLANE</span>
+      <button data-platform-section="agents" class="${
+        state.platformSection === "agents" ? "active" : ""
+      }">Agent</button>
       <button data-platform-section="release" class="${
         state.platformSection === "release" ? "active" : ""
       }">Release</button>
@@ -736,11 +781,10 @@ function platformPage() {
       }">Run 与 Trace</button>
       <div class="later-list">
         <span>后续版本</span>
-        <p>Agent 编排</p>
         <p>Badcase · 成本治理</p>
       </div>
     </aside>
-    ${state.platformSection === "release" ? releasePanel() : state.platformSection === "skills" ? skillPanel() : state.platformSection === "rag" ? ragPanel() : state.platformSection === "mcp" ? mcpPanel() : runsPanel()}
+    ${state.platformSection === "agents" ? agentPanel() : state.platformSection === "release" ? releasePanel() : state.platformSection === "skills" ? skillPanel() : state.platformSection === "rag" ? ragPanel() : state.platformSection === "mcp" ? mcpPanel() : runsPanel()}
   </section>`;
 }
 
@@ -824,6 +868,13 @@ function bindEvents() {
     });
   });
   document.querySelector("#release-form")?.addEventListener("submit", createCandidate);
+  document.querySelector("#agent-form")?.addEventListener("submit", saveAgent);
+  document.querySelectorAll("[data-agent-select]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editingAgent = state.agents.find((item) => item.id === button.dataset.agentSelect) || null;
+      render();
+    });
+  });
   document.querySelector("#skill-form")?.addEventListener("submit", saveSkill);
   document.querySelector("#skill-import-form")?.addEventListener("submit", importSkill);
   document.querySelector("#rag-form")?.addEventListener("submit", saveRagDocument);
@@ -886,8 +937,16 @@ async function loadConversations() {
 }
 
 async function loadPlatform() {
-  if (state.platformSection === "release") {
-    state.releases = await api("/api/releases");
+  if (state.platformSection === "agents") {
+    [state.agents, state.skills, state.ragDocuments, state.mcpServers] = await Promise.all([
+      api("/api/agents"), api("/api/skills"), api("/api/rag/documents"), api("/api/mcp/servers"),
+    ]);
+    const editingId = state.editingAgent?.id;
+    state.editingAgent = state.agents.find((item) => item.id === editingId) || state.agents[0] || null;
+  } else if (state.platformSection === "release") {
+    [state.releases, state.agents] = await Promise.all([
+      api("/api/releases"), api("/api/agents"),
+    ]);
   } else if (state.platformSection === "skills") {
     [state.skills, state.skillImports] = await Promise.all([
       api("/api/skills"),
@@ -902,6 +961,34 @@ async function loadPlatform() {
   }
 }
 
+async function saveAgent(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const mcpToolBindings = form.getAll("mcp_tool_bindings").map((value) => {
+    const separator = String(value).indexOf("::");
+    return {
+      server_id: String(value).slice(0, separator),
+      tool_name: String(value).slice(separator + 2),
+    };
+  }).filter((item) => item.server_id && item.tool_name);
+  const agentId = event.currentTarget.dataset.agentId;
+  await api(`/api/agents/${agentId}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      name: form.get("name"),
+      description: form.get("description"),
+      system_prompt: form.get("system_prompt"),
+      skill_ids: form.getAll("skill_ids"),
+      rag_document_ids: form.getAll("rag_document_ids"),
+      mcp_tool_bindings: mcpToolBindings,
+      tool_ids: form.getAll("tool_ids"),
+    }),
+  });
+  state.notice = "Agent 草稿已保存；Active Release 未改变。请创建候选 Release、检查 Diff 后人工发布。";
+  await loadPlatform();
+  render();
+}
+
 function mcpList(value) {
   return String(value || "").split(/[\n,，]/).map((item) => item.trim()).filter(Boolean);
 }
@@ -914,7 +1001,7 @@ async function saveMcpServer(event) {
     endpoint: form.get("endpoint"), transport: form.get("transport"), auth_type: form.get("auth_type"),
     auth_value: form.get("auth_value"), allowed_tools: mcpList(form.get("allowed_tools")),
     declared_read_only_tools: mcpList(form.get("declared_read_only_tools")),
-    agent_ids: form.getAll("agent_ids"), runtime_config: JSON.parse(form.get("runtime_config")),
+    runtime_config: JSON.parse(form.get("runtime_config")),
   };
   const editingId = state.editingMcp?.id;
   await api(editingId ? `/api/mcp/servers/${editingId}` : "/api/mcp/servers", {
@@ -956,7 +1043,6 @@ function ragFormPayload(formElement) {
     tags: String(form.get("tags") || "").split(/[,，]/).map((item) => item.trim()).filter(Boolean),
     version_note: form.get("version_note"),
     content: form.get("content"),
-    agent_ids: form.getAll("agent_ids"),
   };
 }
 
@@ -980,7 +1066,7 @@ async function saveRagDocument(event) {
     body: JSON.stringify(ragFormPayload(event.currentTarget)),
   });
   state.ragPreview = null;
-  state.ragDraft = { name: "", tags: ["服务", "规则"], version_note: "", content: "", agent_ids: ["general-service"] };
+  state.ragDraft = { name: "", tags: ["服务", "规则"], version_note: "", content: "" };
   state.notice = "RAG Draft 与本地索引已创建；校验并发布前不会影响在线运行。";
   await loadPlatform();
   render();
@@ -1020,7 +1106,7 @@ async function importSkill(event) {
   });
   const result = await response.json();
   state.notice = response.ok
-    ? `导入成功并固定 commit ${result.attempt.commit_sha}；Skill 仍是未绑定 Draft。`
+    ? `导入成功并固定 commit ${result.attempt.commit_sha}；Skill 仍是 Draft，校验后请从 Agent 页面装配。`
     : result.reason || "导入失败，请查看扫描记录。";
   await loadPlatform();
   render();
@@ -1036,7 +1122,6 @@ async function saveSkill(event) {
     non_applicability: form.get("non_applicability"),
     content: form.get("content"),
     output_requirements: form.get("output_requirements"),
-    agent_ids: form.getAll("agent_ids"),
   };
   const editingId = state.editingSkill?.id;
   await api(editingId ? `/api/skills/${editingId}` : "/api/skills", {

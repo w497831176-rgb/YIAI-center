@@ -107,13 +107,27 @@ class McpTests(unittest.TestCase):
             "auth_type": "NONE",
             "allowed_tools": ["read_record"],
             "declared_read_only_tools": ["read_record"],
-            "agent_ids": ["general-service"] if agent_ids is None else agent_ids,
             "runtime_config": {
                 "activation_keywords": ["record"],
                 "default_arguments": {},
                 "result_paths": ["record"],
             },
         }
+
+    def set_mcp_bindings(self, bindings):
+        agent = db.get_agent_config("general-service")
+        return db.save_agent_config(
+            agent["id"],
+            {
+                "name": agent["name"],
+                "description": agent["description"],
+                "system_prompt": agent["system_prompt"],
+                "skill_ids": agent["skill_ids"],
+                "rag_document_ids": agent["rag_document_ids"],
+                "mcp_tool_bindings": bindings,
+                "tool_ids": agent["tool_ids"],
+            },
+        )
 
     def test_streamable_http_session_list_and_call(self):
         client = StreamableHttpMcpClient(self.endpoint)
@@ -142,6 +156,9 @@ class McpTests(unittest.TestCase):
             server["id"], check_connection(self.endpoint, ["read_record"], ["read_record"])
         )
         self.assertEqual(connected["status"], "CONNECTED")
+        self.set_mcp_bindings(
+            [{"server_id": server["id"], "tool_name": "read_record"}]
+        )
         release_a = db.create_candidate("V0.5.9-mcp-a", "bind remote read-only MCP")
         db.activate_release(release_a["id"])
         old_run = db.prepare_run(None, "read record 42")
@@ -159,8 +176,7 @@ class McpTests(unittest.TestCase):
                 "status": "SUCCESS", "error_message": None, "model_api_cost": 0,
             },
         )
-        unbound = db.save_mcp_server(self.payload(agent_ids=[]), server["id"])
-        self.assertEqual(unbound["status"], "CONNECTED")
+        self.set_mcp_bindings([])
         release_b = db.create_candidate("V0.5.9-mcp-b", "unbind remote MCP")
         self.assertEqual(db.get_release_detail(release_b["id"])["diff"]["mcp_removed"], [server["id"]])
         db.activate_release(release_b["id"])

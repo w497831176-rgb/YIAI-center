@@ -244,14 +244,16 @@ def execute_chat(
     mcp_context = ""
     if mcp_preflight.get("matched"):
         server = mcp_preflight["server"]
-        if agent["id"] not in server.get("agent_ids", []):
+        if not mcp_runtime.tool_bound_to_agent(
+            server, str(mcp_preflight.get("tool_name", "")), agent["id"]
+        ):
             trace(
                 run,
                 "mcp_binding_rejected",
                 {
                     "server_id": server["server_id"],
                     "agent_id": agent["id"],
-                    "reason": "server is not bound to selected Agent in this Release",
+                    "reason": "Tool is not bound to selected Agent in this Release",
                 },
             )
         elif mcp_preflight.get("missing_fields"):

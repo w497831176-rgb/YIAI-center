@@ -758,6 +758,67 @@ main {
   font-size: 12px;
 }
 
+.agent-selector {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.agent-selector button {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  text-align: left;
+  border: 1px solid #dbe2eb;
+  border-radius: 12px;
+  padding: 13px 14px;
+  color: #455166;
+  background: white;
+}
+
+.agent-selector button.active {
+  border-color: #43b99a;
+  background: #eff9f6;
+  color: #1f7e66;
+}
+
+.agent-selector small,
+.binding-group > p,
+.binding-server > small {
+  color: #7b8495;
+  font-size: 10px;
+}
+
+.binding-group > p {
+  margin: 0 0 10px;
+}
+
+.capability-form .binding-group label {
+  display: flex;
+  margin: 7px 0;
+}
+
+.binding-group label small {
+  margin-left: auto;
+  color: #8b95a5;
+}
+
+.binding-server {
+  padding: 10px 0;
+  border-top: 1px solid #edf0f4;
+}
+
+.binding-server:first-of-type {
+  border-top: 0;
+}
+
+.binding-server > strong,
+.binding-server > small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
 .form-actions,
 .card-actions,
 .detail-card-head {
@@ -1138,7 +1199,8 @@ main {
   .release-form,
   .runs-grid,
   .capability-form,
-  .import-form {
+  .import-form,
+  .agent-selector {
     grid-template-columns: 1fr;
   }
 

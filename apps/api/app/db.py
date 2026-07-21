@@ -287,6 +287,23 @@ CREATE INDEX IF NOT EXISTS idx_mcp_calls_run ON mcp_call_snaps(run_id, started_a
 """
 
 
+MIGRATION_6 = """
+CREATE TABLE IF NOT EXISTS agent_configs (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    system_prompt TEXT NOT NULL,
+    skill_ids_json TEXT NOT NULL,
+    rag_document_ids_json TEXT NOT NULL,
+    mcp_tool_bindings_json TEXT NOT NULL,
+    tool_ids_json TEXT NOT NULL,
+    validation_errors_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_configs_updated ON agent_configs(updated_at DESC);
+"""
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "router": {
         "id": "router-default",
@@ -371,6 +388,13 @@ def init_db() -> None:
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(5, ?)",
                 (now_iso(),),
             )
+            applied.add(5)
+        if 6 not in applied:
+            conn.executescript(MIGRATION_6)
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(6, ?)",
+                (now_iso(),),
+            )
         count = conn.execute("SELECT COUNT(*) AS n FROM releases").fetchone()["n"]
         if count == 0:
             release_id = "rel_v055_default"
@@ -392,6 +416,7 @@ def init_db() -> None:
                 "INSERT INTO workspaces(id, name, active_release_id) VALUES('default', 'YIAI Center', ?)",
                 (release_id,),
             )
+        _ensure_agent_configs(conn)
 
 
 def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
@@ -550,6 +575,286 @@ def get_release(release_id: str) -> dict[str, Any]:
         return result
 
 
+def _release_agent_bindings(config: dict[str, Any], agent_id: str) -> dict[str, Any]:
+    skill_ids = [
+        str(item["skill_id"])
+        for item in config.get("skills", [])
+        if agent_id in item.get("agent_ids", []) and item.get("skill_id")
+    ]
+    rag_document_ids = [
+        str(item["document_id"])
+        for item in config.get("rag", [])
+        if agent_id in item.get("agent_ids", []) and item.get("document_id")
+    ]
+    mcp_tool_bindings: list[dict[str, str]] = []
+    for server in config.get("mcp", []):
+        server_id = str(server.get("server_id", ""))
+        tool_agent_ids = server.get("tool_agent_ids")
+        if isinstance(tool_agent_ids, dict):
+            tool_names = [
+                str(tool_name)
+                for tool_name, agent_ids in tool_agent_ids.items()
+                if isinstance(agent_ids, list) and agent_id in agent_ids
+            ]
+        elif agent_id in server.get("agent_ids", []):
+            tool_names = [str(item) for item in server.get("allowed_tools", [])]
+        else:
+            tool_names = []
+        mcp_tool_bindings.extend(
+            {"server_id": server_id, "tool_name": tool_name}
+            for tool_name in tool_names
+            if server_id and tool_name
+        )
+    tool_ids = [
+        str(item["tool_id"])
+        for item in config.get("tools", [])
+        if agent_id in item.get("agent_ids", []) and item.get("tool_id")
+    ]
+    return {
+        "skill_ids": list(dict.fromkeys(skill_ids)),
+        "rag_document_ids": list(dict.fromkeys(rag_document_ids)),
+        "mcp_tool_bindings": list(
+            {
+                (item["server_id"], item["tool_name"]): item
+                for item in mcp_tool_bindings
+            }.values()
+        ),
+        "tool_ids": list(dict.fromkeys(tool_ids)),
+    }
+
+
+def _ensure_agent_configs(conn: sqlite3.Connection) -> None:
+    active = conn.execute(
+        """
+        SELECT r.config_json FROM releases r
+        JOIN workspaces w ON w.active_release_id=r.id
+        WHERE w.id='default'
+        """
+    ).fetchone()
+    config = json.loads(active["config_json"]) if active else DEFAULT_CONFIG
+    agents = config.get("agents") or DEFAULT_CONFIG["agents"]
+    for agent in agents:
+        agent_id = str(agent.get("id", "")).strip()
+        if not agent_id:
+            continue
+        bindings = _release_agent_bindings(config, agent_id)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO agent_configs(
+                id, name, description, system_prompt, skill_ids_json,
+                rag_document_ids_json, mcp_tool_bindings_json, tool_ids_json,
+                validation_errors_json, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, '[]', ?)
+            """,
+            (
+                agent_id,
+                str(agent.get("name", agent_id)),
+                str(agent.get("description", "")),
+                str(agent.get("system_prompt", "")),
+                json.dumps(bindings["skill_ids"], ensure_ascii=False),
+                json.dumps(bindings["rag_document_ids"], ensure_ascii=False),
+                json.dumps(bindings["mcp_tool_bindings"], ensure_ascii=False),
+                json.dumps(bindings["tool_ids"], ensure_ascii=False),
+                now_iso(),
+            ),
+        )
+
+
+def _agent_row_dict(row: sqlite3.Row) -> dict[str, Any]:
+    result = dict(row)
+    for source, target in (
+        ("skill_ids_json", "skill_ids"),
+        ("rag_document_ids_json", "rag_document_ids"),
+        ("mcp_tool_bindings_json", "mcp_tool_bindings"),
+        ("tool_ids_json", "tool_ids"),
+        ("validation_errors_json", "validation_errors"),
+    ):
+        result[target] = json.loads(result.pop(source))
+    return result
+
+
+def _agent_binding_details(conn: sqlite3.Connection, agent: dict[str, Any]) -> dict[str, Any]:
+    skills = []
+    for skill_id in agent["skill_ids"]:
+        row = conn.execute(
+            "SELECT id, name, status, current_version_id FROM skills WHERE id=?",
+            (skill_id,),
+        ).fetchone()
+        if row:
+            skills.append(dict(row))
+    rag_documents = []
+    for document_id in agent["rag_document_ids"]:
+        row = conn.execute(
+            "SELECT id, name, status, current_version_id FROM rag_documents WHERE id=?",
+            (document_id,),
+        ).fetchone()
+        if row:
+            rag_documents.append(dict(row))
+    mcp_tools = []
+    for binding in agent["mcp_tool_bindings"]:
+        row = conn.execute(
+            "SELECT id, name, status FROM mcp_servers WHERE id=?",
+            (binding.get("server_id"),),
+        ).fetchone()
+        if row:
+            mcp_tools.append(
+                {
+                    "server_id": row["id"],
+                    "server_name": row["name"],
+                    "server_status": row["status"],
+                    "tool_name": binding.get("tool_name"),
+                }
+            )
+    return {
+        "skills": skills,
+        "rag_documents": rag_documents,
+        "mcp_tools": mcp_tools,
+        "preset_tools": [],
+    }
+
+
+def get_agent_config(agent_id: str) -> dict[str, Any]:
+    with connection() as conn:
+        row = conn.execute("SELECT * FROM agent_configs WHERE id=?", (agent_id,)).fetchone()
+        if row is None:
+            raise KeyError(agent_id)
+        result = _agent_row_dict(row)
+        result["bindings"] = _agent_binding_details(conn, result)
+        result["available_preset_tools"] = []
+        return result
+
+
+def list_agent_configs() -> list[dict[str, Any]]:
+    order = {agent["id"]: index for index, agent in enumerate(DEFAULT_CONFIG["agents"])}
+    with connection() as conn:
+        ids = [row["id"] for row in conn.execute("SELECT id FROM agent_configs").fetchall()]
+    ids.sort(key=lambda item: (order.get(item, 999), item))
+    return [get_agent_config(agent_id) for agent_id in ids]
+
+
+def bound_agent_ids(
+    conn: sqlite3.Connection,
+    capability_type: str,
+    component_id: str,
+    tool_name: str | None = None,
+) -> list[str]:
+    result: list[str] = []
+    for row in conn.execute("SELECT * FROM agent_configs ORDER BY id").fetchall():
+        agent = _agent_row_dict(row)
+        if capability_type == "SKILL" and component_id in agent["skill_ids"]:
+            result.append(agent["id"])
+        elif capability_type == "RAG" and component_id in agent["rag_document_ids"]:
+            result.append(agent["id"])
+        elif capability_type == "MCP":
+            if any(
+                item.get("server_id") == component_id
+                and (tool_name is None or item.get("tool_name") == tool_name)
+                for item in agent["mcp_tool_bindings"]
+            ):
+                result.append(agent["id"])
+        elif capability_type == "TOOL" and component_id in agent["tool_ids"]:
+            result.append(agent["id"])
+    return result
+
+
+def _agent_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_mcp = payload.get("mcp_tool_bindings")
+    mcp_bindings: list[dict[str, str]] = []
+    if isinstance(raw_mcp, list):
+        for item in raw_mcp:
+            if not isinstance(item, dict):
+                continue
+            server_id = str(item.get("server_id", "")).strip()
+            tool_name = str(item.get("tool_name", "")).strip()
+            if server_id and tool_name:
+                mcp_bindings.append({"server_id": server_id, "tool_name": tool_name})
+    return {
+        "name": str(payload.get("name", "")).strip(),
+        "description": str(payload.get("description", "")).strip(),
+        "system_prompt": str(payload.get("system_prompt", "")).strip(),
+        "skill_ids": _string_list(payload.get("skill_ids")),
+        "rag_document_ids": _string_list(payload.get("rag_document_ids")),
+        "mcp_tool_bindings": list(
+            {
+                (item["server_id"], item["tool_name"]): item for item in mcp_bindings
+            }.values()
+        ),
+        "tool_ids": _string_list(payload.get("tool_ids")),
+    }
+
+
+def _agent_validation_errors(
+    conn: sqlite3.Connection, agent_id: str, values: dict[str, Any]
+) -> list[str]:
+    errors: list[str] = []
+    if not values["name"] or len(values["name"]) > 80:
+        errors.append("name 必须为 1-80 个字符")
+    if not values["description"] or len(values["description"]) > 500:
+        errors.append("description 必须为 1-500 个字符")
+    if not values["system_prompt"] or len(values["system_prompt"]) > 20_000:
+        errors.append("system_prompt 必须为 1-20000 个字符")
+    if conn.execute("SELECT 1 FROM agent_configs WHERE id=?", (agent_id,)).fetchone() is None:
+        errors.append("未知垂直 Agent")
+    for skill_id in values["skill_ids"]:
+        row = conn.execute("SELECT status FROM skills WHERE id=?", (skill_id,)).fetchone()
+        if row is None or row["status"] != "VALIDATED":
+            errors.append(f"Skill {skill_id} 不存在或未通过校验")
+    for document_id in values["rag_document_ids"]:
+        row = conn.execute(
+            "SELECT status FROM rag_documents WHERE id=?", (document_id,)
+        ).fetchone()
+        if row is None or row["status"] != "VALIDATED":
+            errors.append(f"RAG {document_id} 不存在或未通过校验")
+    for binding in values["mcp_tool_bindings"]:
+        row = conn.execute(
+            """
+            SELECT status, allowed_tools_json, tools_json FROM mcp_servers WHERE id=?
+            """,
+            (binding["server_id"],),
+        ).fetchone()
+        if row is None or row["status"] != "CONNECTED":
+            errors.append(f"MCP {binding['server_id']} 不存在或未连接")
+            continue
+        allowed = set(json.loads(row["allowed_tools_json"]))
+        observed = {
+            str(item.get("name"))
+            for item in json.loads(row["tools_json"])
+            if item.get("allowed") is True
+        }
+        if binding["tool_name"] not in allowed or binding["tool_name"] not in observed:
+            errors.append(
+                f"MCP Tool {binding['server_id']} / {binding['tool_name']} 不在可绑定只读清单"
+            )
+    if values["tool_ids"]:
+        errors.append("当前版本没有可绑定的预置 Tool")
+    return errors
+
+
+def save_agent_config(agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    values = _agent_payload(payload)
+    with connection() as conn:
+        errors = _agent_validation_errors(conn, agent_id, values)
+        if errors:
+            raise ValueError("；".join(errors))
+        conn.execute(
+            """
+            UPDATE agent_configs SET name=?, description=?, system_prompt=?,
+                skill_ids_json=?, rag_document_ids_json=?, mcp_tool_bindings_json=?,
+                tool_ids_json=?, validation_errors_json='[]', updated_at=?
+            WHERE id=?
+            """,
+            (
+                values["name"], values["description"], values["system_prompt"],
+                json.dumps(values["skill_ids"], ensure_ascii=False),
+                json.dumps(values["rag_document_ids"], ensure_ascii=False),
+                json.dumps(values["mcp_tool_bindings"], ensure_ascii=False),
+                json.dumps(values["tool_ids"], ensure_ascii=False),
+                now_iso(), agent_id,
+            ),
+        )
+    return get_agent_config(agent_id)
+
+
 def _skill_validation_errors(payload: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     fields = {
@@ -568,12 +873,6 @@ def _skill_validation_errors(payload: dict[str, Any]) -> list[str]:
             errors.append(f"{field} 超过 {maximum} 字符")
     if len(str(payload.get("content", "")).strip()) < 20:
         errors.append("content 至少需要 20 个字符")
-    agent_ids = payload.get("agent_ids")
-    allowed_agents = {agent["id"] for agent in DEFAULT_CONFIG["agents"]}
-    if not isinstance(agent_ids, list) or not agent_ids:
-        errors.append("至少绑定一个垂直 Agent")
-    elif any(not isinstance(item, str) or item not in allowed_agents for item in agent_ids):
-        errors.append("agent_ids 包含未知垂直 Agent")
     return errors
 
 
@@ -585,7 +884,6 @@ def _skill_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "non_applicability": str(payload.get("non_applicability", "")).strip(),
         "content": str(payload.get("content", "")).strip(),
         "output_requirements": str(payload.get("output_requirements", "")).strip(),
-        "agent_ids": list(dict.fromkeys(payload.get("agent_ids") or [])),
     }
 
 
@@ -602,6 +900,7 @@ def save_skill(
             skill_id = new_id("skill")
             version_number = 1
             created_at = timestamp
+            legacy_agent_ids: list[str] = []
         else:
             current = conn.execute("SELECT * FROM skills WHERE id=?", (skill_id,)).fetchone()
             if current is None:
@@ -611,6 +910,7 @@ def save_skill(
                 (skill_id,),
             ).fetchone()["n"]
             created_at = current["created_at"]
+            legacy_agent_ids = json.loads(current["agent_ids_json"])
         version_id = new_id("skillv")
         canonical = json.dumps(values, ensure_ascii=False, sort_keys=True).encode("utf-8")
         content_hash = hashlib.sha256(canonical).hexdigest()
@@ -627,7 +927,7 @@ def save_skill(
                 (
                     skill_id, values["name"], values["description"], values["applicability"],
                     values["non_applicability"], values["output_requirements"], version_id,
-                    json.dumps(values["agent_ids"], ensure_ascii=False),
+                    json.dumps(legacy_agent_ids, ensure_ascii=False),
                     json.dumps(errors, ensure_ascii=False), created_at, timestamp,
                 ),
             )
@@ -641,7 +941,7 @@ def save_skill(
                 (
                     values["name"], values["description"], values["applicability"],
                     values["non_applicability"], values["output_requirements"], version_id,
-                    json.dumps(values["agent_ids"], ensure_ascii=False),
+                    json.dumps(legacy_agent_ids, ensure_ascii=False),
                     json.dumps(errors, ensure_ascii=False), timestamp, skill_id,
                 ),
             )
@@ -673,7 +973,9 @@ def get_skill(skill_id: str) -> dict[str, Any]:
             (skill_id,),
         ).fetchall()
         result = dict(skill)
-        result["agent_ids"] = json.loads(result.pop("agent_ids_json"))
+        result["legacy_agent_ids"] = json.loads(result.pop("agent_ids_json"))
+        result["bound_agent_ids"] = bound_agent_ids(conn, "SKILL", skill_id)
+        result["agent_ids"] = list(result["bound_agent_ids"])
         result["validation_errors"] = json.loads(result.pop("validation_errors_json"))
         result["versions"] = rows_to_dicts(versions)
         result["current_version"] = next(
@@ -747,10 +1049,7 @@ def list_skill_import_attempts(limit: int = 50) -> list[dict[str, Any]]:
 
 def validate_skill(skill_id: str) -> dict[str, Any]:
     skill = get_skill(skill_id)
-    payload = {
-        **skill["current_version"],
-        "agent_ids": skill["agent_ids"],
-    }
+    payload = dict(skill["current_version"])
     errors = _skill_validation_errors(payload)
     with connection() as conn:
         conn.execute(
@@ -794,7 +1093,6 @@ def _mcp_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "auth_value": str(payload.get("auth_value", "")),
         "allowed_tools": _string_list(payload.get("allowed_tools")),
         "declared_read_only_tools": _string_list(payload.get("declared_read_only_tools")),
-        "agent_ids": _string_list(payload.get("agent_ids")),
         "runtime_config": runtime_config,
     }
 
@@ -820,9 +1118,6 @@ def _mcp_validation_errors(values: dict[str, Any]) -> list[str]:
         errors.append("at least one allowed Tool is required")
     if not set(values["allowed_tools"]).issubset(set(values["declared_read_only_tools"])):
         errors.append("every allowed Tool must be explicitly declared read-only")
-    allowed_agents = {agent["id"] for agent in DEFAULT_CONFIG["agents"]}
-    if any(agent_id not in allowed_agents for agent_id in values["agent_ids"]):
-        errors.append("agent_ids contains an unknown vertical Agent")
     if len(json.dumps(values["runtime_config"], ensure_ascii=False)) > 20000:
         errors.append("runtime_config exceeds 20000 characters")
     return errors
@@ -837,6 +1132,7 @@ def save_mcp_server(payload: dict[str, Any], server_id: str | None = None) -> di
         if server_id is None:
             server_id = new_id("mcp")
             created_at = timestamp
+            legacy_agent_ids: list[str] = []
             tools: list[dict[str, Any]] = []
             rejected: list[dict[str, Any]] = []
             last_test: dict[str, Any] = {}
@@ -847,6 +1143,7 @@ def save_mcp_server(payload: dict[str, Any], server_id: str | None = None) -> di
             if current is None:
                 raise KeyError(server_id)
             created_at = current["created_at"]
+            legacy_agent_ids = json.loads(current["agent_ids_json"])
             tools = json.loads(current["tools_json"])
             rejected = json.loads(current["rejected_tools_json"])
             last_test = json.loads(current["last_test_json"])
@@ -894,7 +1191,7 @@ def save_mcp_server(payload: dict[str, Any], server_id: str | None = None) -> di
                 status, json.dumps(values["allowed_tools"], ensure_ascii=False),
                 json.dumps(values["declared_read_only_tools"], ensure_ascii=False),
                 json.dumps(tools, ensure_ascii=False), json.dumps(rejected, ensure_ascii=False),
-                json.dumps(values["agent_ids"], ensure_ascii=False),
+                json.dumps(legacy_agent_ids, ensure_ascii=False),
                 json.dumps(values["runtime_config"], ensure_ascii=False), last_test_at,
                 json.dumps(last_test, ensure_ascii=False), json.dumps(errors, ensure_ascii=False),
                 created_at, timestamp,
@@ -940,13 +1237,13 @@ def disable_mcp_server(server_id: str) -> dict[str, Any]:
         if conn.execute("SELECT 1 FROM mcp_servers WHERE id=?", (server_id,)).fetchone() is None:
             raise KeyError(server_id)
         conn.execute(
-            "UPDATE mcp_servers SET status='DISABLED', agent_ids_json='[]', updated_at=? WHERE id=?",
+            "UPDATE mcp_servers SET status='DISABLED', updated_at=? WHERE id=?",
             (now_iso(), server_id),
         )
     return get_mcp_server(server_id)
 
 
-def _mcp_dict(row: sqlite3.Row) -> dict[str, Any]:
+def _mcp_dict(row: sqlite3.Row, conn: sqlite3.Connection) -> dict[str, Any]:
     result = dict(row)
     result.pop("auth_value", None)
     for source, target in (
@@ -954,12 +1251,18 @@ def _mcp_dict(row: sqlite3.Row) -> dict[str, Any]:
         ("declared_read_only_tools_json", "declared_read_only_tools"),
         ("tools_json", "tools"),
         ("rejected_tools_json", "rejected_tools"),
-        ("agent_ids_json", "agent_ids"),
+        ("agent_ids_json", "legacy_agent_ids"),
         ("runtime_config_json", "runtime_config"),
         ("last_test_json", "last_test"),
         ("validation_errors_json", "validation_errors"),
     ):
         result[target] = json.loads(result.pop(source))
+    result["bound_agent_ids"] = bound_agent_ids(conn, "MCP", result["id"])
+    result["agent_ids"] = list(result["bound_agent_ids"])
+    result["tool_agent_ids"] = {
+        tool_name: bound_agent_ids(conn, "MCP", result["id"], tool_name)
+        for tool_name in result["allowed_tools"]
+    }
     return result
 
 
@@ -968,7 +1271,7 @@ def get_mcp_server(server_id: str) -> dict[str, Any]:
         row = conn.execute("SELECT * FROM mcp_servers WHERE id=?", (server_id,)).fetchone()
         if row is None:
             raise KeyError(server_id)
-        result = _mcp_dict(row)
+        result = _mcp_dict(row, conn)
         refs: list[dict[str, Any]] = []
         for release in conn.execute(
             "SELECT id, version, status, config_json FROM releases ORDER BY created_at DESC"
@@ -1009,9 +1312,39 @@ def get_mcp_connection_config(server_id: str) -> dict[str, Any]:
 
 def _candidate_config(conn: sqlite3.Connection, active_config: dict[str, Any]) -> dict[str, Any]:
     config = json.loads(json.dumps(active_config, ensure_ascii=False))
+    agent_rows = conn.execute("SELECT * FROM agent_configs ORDER BY id").fetchall()
+    agents = [_agent_row_dict(row) for row in agent_rows]
+    order = {agent["id"]: index for index, agent in enumerate(DEFAULT_CONFIG["agents"])}
+    agents.sort(key=lambda item: (order.get(item["id"], 999), item["id"]))
+    config["agents"] = [
+        {
+            "id": agent["id"],
+            "name": agent["name"],
+            "description": agent["description"],
+            "system_prompt": agent["system_prompt"],
+        }
+        for agent in agents
+    ]
+
+    skill_agent_ids: dict[str, list[str]] = {}
+    rag_agent_ids: dict[str, list[str]] = {}
+    mcp_tool_agent_ids: dict[tuple[str, str], list[str]] = {}
+    tool_agent_ids: dict[str, list[str]] = {}
+    for agent in agents:
+        for skill_id in agent["skill_ids"]:
+            skill_agent_ids.setdefault(skill_id, []).append(agent["id"])
+        for document_id in agent["rag_document_ids"]:
+            rag_agent_ids.setdefault(document_id, []).append(agent["id"])
+        for binding in agent["mcp_tool_bindings"]:
+            key = (str(binding.get("server_id", "")), str(binding.get("tool_name", "")))
+            if all(key):
+                mcp_tool_agent_ids.setdefault(key, []).append(agent["id"])
+        for tool_id in agent["tool_ids"]:
+            tool_agent_ids.setdefault(tool_id, []).append(agent["id"])
+
     rows = conn.execute(
         """
-        SELECT s.id AS skill_id, s.agent_ids_json, v.*
+        SELECT s.id AS skill_id, v.*
         FROM skills s JOIN skill_versions v ON v.id=s.current_version_id
         WHERE s.status='VALIDATED' ORDER BY s.created_at, s.id
         """
@@ -1028,13 +1361,14 @@ def _candidate_config(conn: sqlite3.Connection, active_config: dict[str, Any]) -
             "content": row["content"],
             "output_requirements": row["output_requirements"],
             "content_hash": row["content_hash"],
-            "agent_ids": json.loads(row["agent_ids_json"]),
+            "agent_ids": list(dict.fromkeys(skill_agent_ids[row["skill_id"]])),
         }
         for row in rows
+        if row["skill_id"] in skill_agent_ids
     ]
     rag_rows = conn.execute(
         """
-        SELECT d.id AS document_id, d.name, d.tags_json, d.agent_ids_json, v.*
+        SELECT d.id AS document_id, d.name, d.tags_json, v.*
         FROM rag_documents d JOIN rag_versions v ON v.id=d.current_version_id
         WHERE d.status='VALIDATED' ORDER BY d.created_at, d.id
         """
@@ -1052,7 +1386,7 @@ def _candidate_config(conn: sqlite3.Connection, active_config: dict[str, Any]) -
             "keyword_engine": row["keyword_engine"],
             "embedding_model": row["embedding_model"],
             "fusion": json.loads(row["fusion_json"]),
-            "agent_ids": json.loads(row["agent_ids_json"]),
+            "agent_ids": list(dict.fromkeys(rag_agent_ids[row["document_id"]])),
             "chunk_ids": [
                 item["id"]
                 for item in conn.execute(
@@ -1062,36 +1396,63 @@ def _candidate_config(conn: sqlite3.Connection, active_config: dict[str, Any]) -
             ],
         }
         for row in rag_rows
+        if row["document_id"] in rag_agent_ids
     ]
     mcp_rows = conn.execute(
         """
         SELECT * FROM mcp_servers
-        WHERE status='CONNECTED' AND agent_ids_json != '[]'
+        WHERE status='CONNECTED'
         ORDER BY created_at, id
         """
     ).fetchall()
-    config["mcp"] = [
-        {
-            "server_id": row["id"],
-            "name": row["name"],
-            "git_url": row["git_url"],
-            "version_ref": row["version_ref"],
-            "endpoint": row["endpoint"],
-            "transport": row["transport"],
-            "auth_type": row["auth_type"],
-            "allowed_tools": json.loads(row["allowed_tools_json"]),
-            "tools": [
-                tool for tool in json.loads(row["tools_json"])
-                if tool.get("allowed") is True
-            ],
-            "rejected_tools": json.loads(row["rejected_tools_json"]),
-            "agent_ids": json.loads(row["agent_ids_json"]),
-            "runtime_config": json.loads(row["runtime_config_json"]),
-            "last_test_at": row["last_test_at"],
-            "last_test": json.loads(row["last_test_json"]),
+    config["mcp"] = []
+    for row in mcp_rows:
+        allowed_order = json.loads(row["allowed_tools_json"])
+        observed = {
+            str(tool.get("name")): tool
+            for tool in json.loads(row["tools_json"])
+            if tool.get("allowed") is True and tool.get("name")
         }
-        for row in mcp_rows
-    ]
+        selected_tools = [
+            tool_name
+            for tool_name in allowed_order
+            if (row["id"], tool_name) in mcp_tool_agent_ids and tool_name in observed
+        ]
+        if not selected_tools:
+            continue
+        per_tool_agents = {
+            tool_name: list(
+                dict.fromkeys(mcp_tool_agent_ids[(row["id"], tool_name)])
+            )
+            for tool_name in selected_tools
+        }
+        server_agent_ids = list(
+            dict.fromkeys(
+                agent_id
+                for tool_name in selected_tools
+                for agent_id in per_tool_agents[tool_name]
+            )
+        )
+        config["mcp"].append(
+            {
+                "server_id": row["id"],
+                "name": row["name"],
+                "git_url": row["git_url"],
+                "version_ref": row["version_ref"],
+                "endpoint": row["endpoint"],
+                "transport": row["transport"],
+                "auth_type": row["auth_type"],
+                "allowed_tools": selected_tools,
+                "tools": [observed[tool_name] for tool_name in selected_tools],
+                "rejected_tools": json.loads(row["rejected_tools_json"]),
+                "agent_ids": server_agent_ids,
+                "tool_agent_ids": per_tool_agents,
+                "runtime_config": json.loads(row["runtime_config_json"]),
+                "last_test_at": row["last_test_at"],
+                "last_test": json.loads(row["last_test_json"]),
+            }
+        )
+    config["tools"] = []
     return config
 
 
@@ -1123,16 +1484,48 @@ def _save_release_bindings(conn: sqlite3.Connection, release_id: str, config: di
                 ),
             )
     for server in config.get("mcp", []):
-        for agent_id in server.get("agent_ids", []):
+        tool_agent_ids = server.get("tool_agent_ids")
+        if isinstance(tool_agent_ids, dict):
+            for tool_name, agent_ids in tool_agent_ids.items():
+                for agent_id in agent_ids:
+                    conn.execute(
+                        """
+                        INSERT INTO release_bindings(
+                            release_id, capability_type, component_version_id, agent_id, config_json
+                        ) VALUES(?, 'MCP_TOOL', ?, ?, ?)
+                        """,
+                        (
+                            release_id, f"{server['server_id']}::{tool_name}", agent_id,
+                            json.dumps(
+                                {**server, "bound_tool_name": tool_name},
+                                ensure_ascii=False,
+                            ),
+                        ),
+                    )
+        else:
+            for agent_id in server.get("agent_ids", []):
+                conn.execute(
+                    """
+                    INSERT INTO release_bindings(
+                        release_id, capability_type, component_version_id, agent_id, config_json
+                    ) VALUES(?, 'MCP', ?, ?, ?)
+                    """,
+                    (
+                        release_id, server["server_id"], agent_id,
+                        json.dumps(server, ensure_ascii=False),
+                    ),
+                )
+    for tool in config.get("tools", []):
+        for agent_id in tool.get("agent_ids", []):
             conn.execute(
                 """
                 INSERT INTO release_bindings(
                     release_id, capability_type, component_version_id, agent_id, config_json
-                ) VALUES(?, 'MCP', ?, ?, ?)
+                ) VALUES(?, 'TOOL', ?, ?, ?)
                 """,
                 (
-                    release_id, server["server_id"], agent_id,
-                    json.dumps(server, ensure_ascii=False),
+                    release_id, tool["tool_id"], agent_id,
+                    json.dumps(tool, ensure_ascii=False),
                 ),
             )
 
@@ -1160,8 +1553,76 @@ def get_release_detail(release_id: str) -> dict[str, Any]:
         if json.dumps(target_mcp_by_id[server_id], ensure_ascii=False, sort_keys=True)
         != json.dumps(active_mcp_by_id[server_id], ensure_ascii=False, sort_keys=True)
     }
+
+    target_agents = {
+        str(item["id"]): item for item in target["config"].get("agents", [])
+    }
+    active_agents = {
+        str(item["id"]): item for item in active["config"].get("agents", [])
+    }
+    target_agent_ids = set(target_agents)
+    active_agent_ids = set(active_agents)
+    agents_changed = {
+        agent_id
+        for agent_id in target_agent_ids & active_agent_ids
+        if json.dumps(target_agents[agent_id], ensure_ascii=False, sort_keys=True)
+        != json.dumps(active_agents[agent_id], ensure_ascii=False, sort_keys=True)
+    }
+
+    def binding_snapshot(config: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
+        snapshot: dict[str, dict[str, list[str]]] = {
+            str(agent["id"]): {"skills": [], "rag": [], "mcp_tools": [], "tools": []}
+            for agent in config.get("agents", [])
+        }
+        for skill in config.get("skills", []):
+            for agent_id in skill.get("agent_ids", []):
+                snapshot.setdefault(agent_id, {"skills": [], "rag": [], "mcp_tools": [], "tools": []})[
+                    "skills"
+                ].append(str(skill["skill_version_id"]))
+        for document in config.get("rag", []):
+            for agent_id in document.get("agent_ids", []):
+                snapshot.setdefault(agent_id, {"skills": [], "rag": [], "mcp_tools": [], "tools": []})[
+                    "rag"
+                ].append(str(document["rag_version_id"]))
+        for server in config.get("mcp", []):
+            tool_agents = server.get("tool_agent_ids")
+            if isinstance(tool_agents, dict):
+                for tool_name, agent_ids in tool_agents.items():
+                    for agent_id in agent_ids:
+                        snapshot.setdefault(agent_id, {"skills": [], "rag": [], "mcp_tools": [], "tools": []})[
+                            "mcp_tools"
+                        ].append(f"{server['server_id']}::{tool_name}")
+            else:
+                for agent_id in server.get("agent_ids", []):
+                    for tool_name in server.get("allowed_tools", []):
+                        snapshot.setdefault(agent_id, {"skills": [], "rag": [], "mcp_tools": [], "tools": []})[
+                            "mcp_tools"
+                        ].append(f"{server['server_id']}::{tool_name}")
+        for tool in config.get("tools", []):
+            for agent_id in tool.get("agent_ids", []):
+                snapshot.setdefault(agent_id, {"skills": [], "rag": [], "mcp_tools": [], "tools": []})[
+                    "tools"
+                ].append(str(tool["tool_id"]))
+        for values in snapshot.values():
+            for key in values:
+                values[key] = sorted(set(values[key]))
+        return snapshot
+
+    target_bindings = binding_snapshot(target["config"])
+    active_bindings = binding_snapshot(active["config"])
+    agent_bindings_changed = sorted(
+        agent_id
+        for agent_id in set(target_bindings) | set(active_bindings)
+        if target_bindings.get(agent_id) != active_bindings.get(agent_id)
+    )
     target["diff"] = {
         "base_release_id": active_id,
+        "agents_added": sorted(target_agent_ids - active_agent_ids),
+        "agents_removed": sorted(active_agent_ids - target_agent_ids),
+        "agents_changed": sorted(agents_changed),
+        "agents_unchanged": sorted((target_agent_ids & active_agent_ids) - agents_changed),
+        "agent_bindings_changed": agent_bindings_changed,
+        "agent_binding_snapshot": target_bindings,
         "skills_added": sorted(target_skills - active_skills),
         "skills_removed": sorted(active_skills - target_skills),
         "skills_unchanged": sorted(target_skills & active_skills),

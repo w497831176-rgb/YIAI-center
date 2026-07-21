@@ -101,6 +101,8 @@ class YIAIHandler(BaseHTTPRequestHandler):
                 self._send_json(db.get_workspace())
             elif path == "/api/releases":
                 self._send_json(db.list_releases())
+            elif path == "/api/agents":
+                self._send_json(db.list_agent_configs())
             elif path == "/api/skills":
                 self._send_json(db.list_skills())
             elif path == "/api/skill-imports":
@@ -123,6 +125,12 @@ class YIAIHandler(BaseHTTPRequestHandler):
                     self._send_json(db.get_run_detail(run_id))
                 except KeyError:
                     self._send_json({"detail": "Run not found"}, 404)
+            elif re.fullmatch(r"/api/agents/[^/]+", path):
+                agent_id = path.removeprefix("/api/agents/")
+                try:
+                    self._send_json(db.get_agent_config(agent_id))
+                except KeyError:
+                    self._send_json({"detail": "Agent not found"}, 404)
             elif re.fullmatch(r"/api/skills/[^/]+", path):
                 skill_id = path.removeprefix("/api/skills/")
                 try:
@@ -331,6 +339,20 @@ class YIAIHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         path = urlparse(self.path).path
+        agent_match = re.fullmatch(r"/api/agents/([^/]+)", path)
+        if agent_match:
+            try:
+                self._send_json(
+                    db.save_agent_config(agent_match.group(1), self._read_json())
+                )
+            except KeyError:
+                self._send_json({"detail": "Agent not found"}, 404)
+            except (ValueError, json.JSONDecodeError) as exc:
+                self._send_json({"detail": str(exc) or "Invalid Agent config"}, 400)
+            except Exception as exc:
+                print(f"PUT {path} failed: {type(exc).__name__}", flush=True)
+                self._send_json({"detail": "Internal error"}, 500)
+            return
         mcp_match = re.fullmatch(r"/api/mcp/servers/([^/]+)", path)
         if mcp_match:
             try:

@@ -44,8 +44,22 @@ class RagTests(unittest.TestCase):
             "tags": ["服务", "规则"],
             "version_note": "首版真实混合检索演示",
             "content": DOCUMENT,
-            "agent_ids": ["general-service"],
         }
+
+    def bind_document(self, document_id):
+        agent = db.get_agent_config("general-service")
+        db.save_agent_config(
+            agent["id"],
+            {
+                "name": agent["name"],
+                "description": agent["description"],
+                "system_prompt": agent["system_prompt"],
+                "skill_ids": agent["skill_ids"],
+                "rag_document_ids": [document_id],
+                "mcp_tool_bindings": agent["mcp_tool_bindings"],
+                "tool_ids": agent["tool_ids"],
+            },
+        )
 
     def test_preview_is_deterministic_and_discloses_real_technology(self):
         first = rag.preview_document(DOCUMENT)
@@ -85,6 +99,7 @@ class RagTests(unittest.TestCase):
         self.assertEqual(before["release_config"].get("rag", []), [])
         validated = rag.validate_document(document["id"])
         self.assertEqual(validated["status"], "VALIDATED")
+        self.bind_document(document["id"])
         candidate = db.create_candidate("V0.5.8-rag-test", "发布真实混合检索")
         detail = db.get_release_detail(candidate["id"])
         self.assertEqual(detail["config"]["rag"][0]["rag_version_id"], document["current_version_id"])
