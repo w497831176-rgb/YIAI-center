@@ -1,0 +1,104 @@
+{
+  "name": "命语紫微斗数排盘 MCP",
+  "git_url": "https://github.com/Brhiza/mingyu",
+  "version_ref": "8e24d474d25d52d8b33533fe6e4dbc50aae6d9c8",
+  "endpoint": "http://192.168.50.232:19120/mcp",
+  "transport": "STREAMABLE_HTTP",
+  "auth_type": "NONE",
+  "allowed_tools": [
+    "ziwei_calculate"
+  ],
+  "declared_read_only_tools": [
+    "ziwei_calculate"
+  ],
+  "agent_ids": [
+    "general-service"
+  ],
+  "runtime_config": {
+    "activation_keywords": [
+      "紫微斗数",
+      "紫微",
+      "排盘",
+      "星盘"
+    ],
+    "business_instructions": "Only select ziwei_calculate. Extract year, month, day as strings; gender is female or male; dateType is solar or lunar. Convert the explicit clock time to timeIndex using 0=早子, 1=丑, 2=寅, 3=卯, 4=辰, 5=巳, 6=午, 7=未, 8=申, 9=酉, 10=戌, 11=亥, 12=晚子; therefore 07:35 is timeIndex 4. For solar dates set isLeap false. When the user explicitly says not to use true solar time, set useTrueSolarTime false and preserve hour and minute. Never infer gender, calendar mode, clock time, leap-month state for a lunar date, birthplace, longitude, or true-solar-time choice. Do not select ziwei_prompt or any other Tool.",
+    "required_fields": [
+      "出生年",
+      "出生月",
+      "出生日",
+      "出生小时",
+      "出生分钟",
+      "性别",
+      "历法类型",
+      "闰月状态（仅农历时必填）"
+    ],
+    "clarification_prompt": "还需要告诉我性别，以及这是阳历还是农历。若需要真太阳时校正，也请提供出生城市；不校正可以不填。",
+    "default_arguments": {
+      "promptScope": "full"
+    },
+    "default_tool": "ziwei_calculate",
+    "argument_extractors": [
+      {"target": "year", "pattern": "(?P<value>\\d{4})年", "type": "string"},
+      {"target": "month", "pattern": "年(?P<value>\\d{1,2})月", "type": "string"},
+      {"target": "day", "pattern": "月(?P<value>\\d{1,2})日", "type": "string"},
+      {"target": "hour", "pattern": "日(?P<value>\\d{1,2})[点时]", "type": "integer", "trace_only": true},
+      {"target": "minute", "pattern": "[点时](?P<value>\\d{1,2})分", "type": "integer", "trace_only": true},
+      {"target": "gender", "pattern": "(?P<value>女性|女|男性|男)", "type": "string", "value_map": {"女性": "female", "女": "female", "男性": "male", "男": "male"}},
+      {"target": "dateType", "pattern": "(?P<value>阳历|公历|农历|阴历)", "type": "string", "value_map": {"阳历": "solar", "公历": "solar", "农历": "lunar", "阴历": "lunar"}},
+      {"target": "useTrueSolarTime", "pattern": "(?P<value>不使用真太阳时|不校正|使用真太阳时|真太阳时校正)", "value_map": {"不使用真太阳时": false, "不校正": false, "使用真太阳时": true, "真太阳时校正": true}},
+      {"target": "isLeapMonth", "pattern": "(?P<value>闰月|非闰月)", "value_map": {"闰月": true, "非闰月": false}}
+    ],
+    "conditional_defaults": [
+      {"when": {"dateType": "solar"}, "set": {"isLeapMonth": false}}
+    ],
+    "range_lookups": [
+      {"source": "hour", "target": "timeIndex", "ranges": [
+        {"min": 0, "max": 0, "value": 0}, {"min": 1, "max": 2, "value": 1},
+        {"min": 3, "max": 4, "value": 2}, {"min": 5, "max": 6, "value": 3},
+        {"min": 7, "max": 8, "value": 4}, {"min": 9, "max": 10, "value": 5},
+        {"min": 11, "max": 12, "value": 6}, {"min": 13, "max": 14, "value": 7},
+        {"min": 15, "max": 16, "value": 8}, {"min": 17, "max": 18, "value": 9},
+        {"min": 19, "max": 20, "value": 10}, {"min": 21, "max": 22, "value": 11},
+        {"min": 23, "max": 23, "value": 12}
+      ]}
+    ],
+    "required_arguments": ["year", "month", "day", "gender", "dateType"],
+    "required_extracted": ["hour", "minute"],
+    "conditional_required": [
+      {"when": {"dateType": "lunar"}, "arguments": ["isLeapMonth"]}
+    ],
+    "argument_examples": [
+      {
+        "user": "我是女性，阳历1992年8月21日7点35分出生，不使用真太阳时",
+        "arguments": {
+          "gender": "female",
+          "dateType": "solar",
+          "year": "1992",
+          "month": "8",
+          "day": "21",
+          "timeIndex": 4,
+          "isLeap": false,
+          "useTrueSolarTime": false,
+          "hour": 7,
+          "minute": 35,
+          "promptScope": "full"
+        },
+        "missing_fields": []
+      }
+    ],
+    "result_paths": [
+      "basicInfo",
+      "scopeNames",
+      "命宫",
+      "身宫",
+      "五行局",
+      "四化",
+      "birthMutagens",
+      "fourMutagens",
+      "gongList",
+      "payloadByScope.decadal",
+      "payloadByScope.yearly"
+    ],
+    "answer_instructions": "When the user asks only for a chart, do not add fortune-telling interpretation. Organize only fields actually returned by ziwei_calculate, prioritizing birth data, 命宫、身宫、十二宫、主星和辅星、四化、大限 and requested yearly data. If a requested field is absent, say it is absent; never fabricate it. State that additional returned data remains available in the Run detail. If the user asks for interpretation, interpret only the real ziwei_calculate result; never claim ziwei_prompt ran."
+  }
+}

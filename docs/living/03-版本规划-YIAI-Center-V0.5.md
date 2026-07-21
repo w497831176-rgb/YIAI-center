@@ -1,6 +1,6 @@
 # YIAI Center 小步迭代版本规划
 
-> 当前版本：V0.5.8  
+> 当前版本：V0.5.9
 > 文档视角：产品交付与开发拆解  
 > 文档性质：Living Roadmap（动态路线图），不是固定排期承诺  
 > 用途：把产品全局 Y/N 和架构全局 Y/N 拆成小功能、小版本和真实验收  
@@ -484,8 +484,10 @@
 
 本次只完成：
 
-- 一个已部署远程 MCP Server。
-- initialize、tools/list、单 Tool 测试、绑定和调用。
+- 独立部署固定 commit 的命语 MCP，并在独立服务侧增加最小 Streamable HTTP Adapter。
+- 平台保存命语和 MCP 官方文档两个远程 Server。
+- initialize、tools/list、只读校验、白名单、Agent 绑定、单 Tool 测试、运行调用和完整 Trace。
+- 两次 Candidate／Diff／人工发布完成 A→B 热切换，历史 Run 保留旧快照。
 
 产品 Y/N：
 
@@ -498,7 +500,7 @@
 - [Y] Streamable HTTP。
 - [Y] Schema hash 随 Release 固定。
 - [Y] 调用生成外部 Snap。
-- [N] 不运行 Git MCP 和 stdio。
+- [N] YIAI Center 不运行 Git MCP 和 stdio；独立部署层固定上游 commit 并提供远程 HTTP。
 - [N] 不接动态写 Tool。
 
 真实验收：
@@ -509,7 +511,20 @@
 - 对话中真实调用和 Trace。
 - 未绑定 Tool 无法调用。
 
-当前状态：待开始。
+当前状态：已完成（2026-07-21）。
+
+真实证据：
+
+- 命语独立容器 `yiai-mcp-mingyu`，Endpoint `http://192.168.50.232:19120/mcp`，固定 commit `8e24d474d25d52d8b33533fe6e4dbc50aae6d9c8`。
+- 命语连接返回 56 个 Tool，仅 `ziwei_calculate` 被允许，55 个未在 Release 白名单的 Tool 被拒绝。
+- MCP 官方文档 Server 返回 3 个 Tool，仅 `search_model_context_protocol` 被允许；文件查询 Tool 和 `submit_feedback` 未进入白名单。
+- 命语验收 Release `rel_8e71df9301be4b7e936941ceda531bb4`；真实 Run `run_c6a864bd64d04ed3b6d124fd6623dc78` 调用且只调用 `ziwei_calculate`，`timeIndex=4`，MCP 结果长度 3,642,960，MCP 模型成本 0。
+- 集中追问 Run `run_312f2d79fc564ae4bb8a547e5cf6f38a` 未调用 MCP，按指定文案一次性询问性别与历法。
+- 热切换 Release `rel_da9c4e8d8eb540ed89c6738bdc7b9252` 同时移除命语、增加官方文档；同一会话新 Run `run_fccbf50fe28c4fbba496114ddf4102f9` 真实调用官方文档搜索。
+- 切换前后 YIAI 容器 ID 和创建时间均为 `5dacb53d75e15e1f0bc089fc7d0494a8376f3a20198dc26032f9e22aa5088a26`／`2026-07-21T02:11:36.752366345Z`，未重建应用容器。
+- 21 条 unittest 全部通过；V0.5.8 数据库在第五号迁移前复制为 `data/yiai-center.sqlite.pre-v059-20260721`。
+
+未完成：浏览器视觉、长 Tool 清单展开和表单点击仍由产品负责人手动验证；GitHub 官方 MCP 因未提供独立最小只读 Token，不阻塞本版本。
 
 ## 14. V0.5.10——工单只读
 
@@ -781,8 +796,7 @@
 
 当前下一步：
 
-1. 产品负责人手动打开 `http://192.168.50.232:19080`，体验历史对话、消息时间戳、AI 气泡下的 Run 入口、右侧详情抽屉、Trace 输入／回答和人民币逐步成本。
-2. 若手动体验仍发现阻塞 V0.5.5 的问题，继续作为 V0.5.5 同版本纠偏并回归 04 文档中的相关测试。
-3. 若 V0.5.5 手动体验通过，再从 V0.5.6 自然语言 Skill 开始下一批次。
-4. FastGPT 继续只作为可选 Gate 判断，不安装、不修改其内部数据库，也不阻塞直接 DeepSeek 主路径。
-5. 下一批开发前重新阅读并按事实更新五份 Living Docs。
+1. 产品负责人手动打开 `http://192.168.50.232:19080`，体验 MCP 管理卡片、连接结果、Release Diff、历史气泡 Run 抽屉和完整 MCP Snap。
+2. 手动核对命语旧 Run 与官方文档新 Run 在同一会话中的 Release、Tool、参数、摘要和成本展示。
+3. 若页面体验存在阻塞 V0.5.9 的问题，保持同版本纠偏并回归 04 文档。
+4. 手动体验通过后再进入 V0.5.10 工单只读；GitHub 官方 MCP 等到独立最小只读 Token 后再补充。

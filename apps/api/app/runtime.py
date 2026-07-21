@@ -5,7 +5,7 @@ import re
 import time
 from typing import Any, Iterator
 
-from . import db, rag
+from . import db, mcp_runtime, rag
 from .deepseek import DeepSeekAdapter
 
 
@@ -130,6 +130,70 @@ def execute_chat(
     )
 
     adapter = DeepSeekAdapter()
+    matching_mcp = mcp_runtime.matching_servers(run["release_config"], content)
+    mcp_preflight: dict[str, Any] = {"matched": False}
+    trace(
+        run,
+        "mcp_input_completeness_check",
+        {
+            "candidate_server_ids": [server["server_id"] for server in matching_mcp],
+            "status": "STARTED" if matching_mcp else "NOT_APPLICABLE",
+            "raw_user_input": content,
+        },
+    )
+    if matching_mcp:
+        try:
+            trace(run, "cloud_call_started", {"phase": "mcp_preflight", "model": "deepseek-v4-flash"})
+            preflight_content, preflight_snap = adapter.complete(
+                mcp_runtime.preflight_messages(matching_mcp, content)
+            )
+            db.save_cloud_snap(run["run_id"], "mcp_preflight", preflight_snap)
+            trace(
+                run,
+                "cloud_call_completed",
+                {
+                    "phase": "mcp_preflight",
+                    "cloud_call_id": preflight_snap["cloud_call_id"],
+                    "usage_status": preflight_snap["usage_status"],
+                },
+            )
+            mcp_preflight = mcp_runtime.enrich_preflight(
+                mcp_runtime.parse_preflight(preflight_content, matching_mcp), content
+            )
+            trace(
+                run,
+                "mcp_input_completeness_completed",
+                {
+                    "matched": mcp_preflight.get("matched", False),
+                    "server_id": mcp_preflight.get("server_id"),
+                    "tool_name": mcp_preflight.get("tool_name"),
+                    "missing_fields": mcp_preflight.get("missing_fields", []),
+                    "raw_extracted": mcp_preflight.get("raw_extracted", {}),
+                },
+            )
+        except Exception as exc:
+            try:
+                mcp_preflight = mcp_runtime.config_preflight(matching_mcp[0], content)
+                trace(
+                    run,
+                    "mcp_input_completeness_completed",
+                    {
+                        "matched": True,
+                        "server_id": mcp_preflight["server_id"],
+                        "tool_name": mcp_preflight["tool_name"],
+                        "missing_fields": mcp_preflight["missing_fields"],
+                        "raw_extracted": mcp_preflight["raw_extracted"],
+                        "source": mcp_preflight["source"],
+                        "model_preflight_error": type(exc).__name__,
+                    },
+                )
+            except Exception as fallback_exc:
+                mcp_preflight = {"matched": False, "preflight_error": type(exc).__name__}
+                trace(
+                    run,
+                    "mcp_input_completeness_failed",
+                    {"error": type(exc).__name__, "fallback_error": type(fallback_exc).__name__},
+                )
     router_prompt = [
         {
             "role": "system",
@@ -176,6 +240,124 @@ def execute_chat(
         "agent_selected",
         {"agent_id": agent["id"], "agent_name": agent["name"]},
     )
+    mcp_snap: dict[str, Any] | None = None
+    mcp_context = ""
+    if mcp_preflight.get("matched"):
+        server = mcp_preflight["server"]
+        if agent["id"] not in server.get("agent_ids", []):
+            trace(
+                run,
+                "mcp_binding_rejected",
+                {
+                    "server_id": server["server_id"],
+                    "agent_id": agent["id"],
+                    "reason": "server is not bound to selected Agent in this Release",
+                },
+            )
+        elif mcp_preflight.get("missing_fields"):
+            clarification = str(
+                (server.get("runtime_config") or {}).get("clarification_prompt")
+                or "请一次性补充缺少的信息后再试。"
+            )
+            trace(
+                run,
+                "mcp_clarification_requested",
+                {
+                    "server_id": server["server_id"],
+                    "tool_name": mcp_preflight["tool_name"],
+                    "missing_fields": mcp_preflight["missing_fields"],
+                    "clarification": clarification,
+                },
+            )
+            yield sse("route_decision", route)
+            yield sse("agent_selected", {"agent_id": agent["id"], "agent_name": agent["name"]})
+            yield sse("delta", {"content": clarification})
+            latency_ms = round((time.perf_counter() - started) * 1000)
+            result = db.finish_run(
+                run["run_id"], run["release_id"], run["conversation_id"],
+                agent["id"], clarification, latency_ms,
+            )
+            trace(
+                run,
+                "assistant_response_completed",
+                {
+                    "message_id": result["message_id"], "role": "assistant",
+                    "agent_id": agent["id"], "agent_name": agent["name"],
+                    "content": clarification,
+                },
+            )
+            done_payload = {
+                "run_id": run["run_id"], "status": "DONE", "agent_id": agent["id"],
+                "agent_name": agent["name"], "release_id": run["release_id"],
+                "release_version": run["release_version"], "latency_ms": latency_ms,
+                "estimated_cost": result["estimated_cost"],
+                "estimated_cost_cny": result["estimated_cost_cny"],
+                "display_currency": "CNY", "clarification_required": True,
+                "missing_fields": mcp_preflight["missing_fields"],
+            }
+            trace(run, "done", done_payload)
+            yield sse("done", done_payload)
+            return
+        else:
+            trace(
+                run,
+                "mcp_tool_selected",
+                {
+                    "server_id": server["server_id"], "server_name": server["name"],
+                    "tool_name": mcp_preflight["tool_name"], "agent_id": agent["id"],
+                    "release_id": run["release_id"], "release_version": run["release_version"],
+                },
+            )
+            trace(
+                run,
+                "mcp_parameters_extracted",
+                {
+                    "raw_user_input": content,
+                    "raw_extracted": mcp_preflight.get("raw_extracted", {}),
+                    "tool_arguments": mcp_preflight["arguments"],
+                },
+            )
+            trace(
+                run,
+                "mcp_request",
+                {
+                    "server_id": server["server_id"], "server_name": server["name"],
+                    "git_url": server["git_url"], "version_ref": server["version_ref"],
+                    "endpoint": server["endpoint"], "transport": server["transport"],
+                    "tool_name": mcp_preflight["tool_name"],
+                    "arguments": mcp_preflight["arguments"],
+                    "release_id": run["release_id"], "model_api_cost": 0,
+                },
+            )
+            try:
+                mcp_snap = mcp_runtime.call_release_tool(
+                    run, server, mcp_preflight["tool_name"], mcp_preflight["arguments"]
+                )
+                trace(
+                    run,
+                    "mcp_response",
+                    {
+                        **mcp_snap,
+                        "request_args": mcp_preflight["arguments"],
+                        "release_id": run["release_id"],
+                    },
+                )
+                mcp_context = mcp_runtime.prompt_context(mcp_snap, server)
+            except Exception as exc:
+                trace(
+                    run,
+                    "mcp_response",
+                    {
+                        "server_id": server["server_id"], "server_name": server["name"],
+                        "tool_name": mcp_preflight["tool_name"], "status": "FAILED",
+                        "error_message": f"{type(exc).__name__}: {str(exc)}"[:1000], "model_api_cost": 0,
+                        "release_id": run["release_id"],
+                    },
+                )
+                mcp_context = (
+                    "\n\nThe selected remote read-only Tool failed. State that the requested live data "
+                    "is temporarily unavailable and do not fabricate a result."
+                )
     skills = released_skills(run["release_config"], agent["id"])
     trace(
         run,
@@ -251,7 +433,7 @@ def execute_chat(
     messages = [
         {
             "role": "system",
-            "content": agent["system_prompt"] + skill_prompt(skills) + rag.prompt_context(rag_result),
+            "content": agent["system_prompt"] + skill_prompt(skills) + rag.prompt_context(rag_result) + mcp_context,
         },
         *history,
     ]
@@ -344,6 +526,13 @@ def execute_chat(
                 "citations": rag_result["citations"],
                 "used_citations": used_citations,
                 "injected_char_count": rag_result["injected_char_count"],
+            },
+            "mcp": {
+                "called": mcp_snap is not None,
+                "server_id": mcp_snap.get("server_id") if mcp_snap else None,
+                "tool_name": mcp_snap.get("tool_name") if mcp_snap else None,
+                "status": mcp_snap.get("status") if mcp_snap else None,
+                "model_api_cost": 0,
             },
         }
         trace(run, "done", done_payload)

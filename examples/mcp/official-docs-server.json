@@ -1,0 +1,36 @@
+{
+  "name": "MCP 官方文档远程 Server",
+  "git_url": "https://github.com/modelcontextprotocol/servers",
+  "version_ref": "remote-service-2026-07-21",
+  "endpoint": "https://modelcontextprotocol.io/mcp",
+  "transport": "STREAMABLE_HTTP",
+  "auth_type": "NONE",
+  "allowed_tools": [
+    "search_model_context_protocol"
+  ],
+  "declared_read_only_tools": [
+    "search_model_context_protocol"
+  ],
+  "agent_ids": [],
+  "runtime_config": {
+    "activation_keywords": [
+      "Model Context Protocol",
+      "MCP 官方文档",
+      "MCP 协议",
+      "Streamable HTTP"
+    ],
+    "business_instructions": "Use only search_model_context_protocol to answer questions about the official Model Context Protocol documentation. Extract the user's documentation query without adding unrelated operations.",
+    "required_fields": [
+      "查询问题"
+    ],
+    "clarification_prompt": "请告诉我你想查询的 MCP 协议问题。",
+    "default_arguments": {},
+    "default_tool": "search_model_context_protocol",
+    "argument_extractors": [
+      {"target": "query", "pattern": "(?P<value>[\\s\\S]+)", "type": "string"}
+    ],
+    "required_arguments": ["query"],
+    "result_paths": [],
+    "answer_instructions": "Answer from the official documentation search result and distinguish directly returned facts from inference."
+  }
+}

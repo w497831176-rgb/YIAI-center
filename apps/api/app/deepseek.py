@@ -76,7 +76,7 @@ def request_body(messages: list[dict[str, str]], stream: bool) -> dict[str, Any]
         "messages": messages,
         "thinking": {"type": "enabled"},
         "reasoning_effort": settings.thinking_effort,
-        "max_tokens": 700,
+        "max_tokens": 4096,
         "stream": stream,
         **({"stream_options": {"include_usage": True}} if stream else {}),
     }

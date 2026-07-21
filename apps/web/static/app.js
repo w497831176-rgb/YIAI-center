@@ -17,6 +17,9 @@ const state = {
   ragPreview: null,
   ragQueryResult: null,
   ragDraft: { name: "", tags: ["服务", "规则"], version_note: "", content: "", agent_ids: ["general-service"] },
+  mcpServers: [],
+  editingMcp: null,
+  mcpToolResult: null,
   runs: [],
   selectedRun: null,
   drawerRun: null,
@@ -283,6 +286,10 @@ function releaseDiff() {
       ${fact("新增 RAGVersion", (diff.rag_added || []).join("、") || "无")}
       ${fact("移除 RAGVersion", (diff.rag_removed || []).join("、") || "无")}
       ${fact("未变化 RAGVersion", (diff.rag_unchanged || []).join("、") || "无")}
+      ${fact("新增 MCP Server", (diff.mcp_added || []).join("、") || "无")}
+      ${fact("移除 MCP Server", (diff.mcp_removed || []).join("、") || "无")}
+      ${fact("配置变更 MCP Server", (diff.mcp_changed || []).join("、") || "无")}
+      ${fact("未变化 MCP Server", (diff.mcp_unchanged || []).join("、") || "无")}
     </div>
   </section>`;
 }
@@ -423,6 +430,69 @@ function ragCard(document) {
   </article>`;
 }
 
+function mcpPanel() {
+  const current = state.editingMcp;
+  const checked = new Set(current?.agent_ids || []);
+  const runtimeConfig = current?.runtime_config || {
+    activation_keywords: [], business_instructions: "", required_fields: [],
+    clarification_prompt: "", default_arguments: {}, result_paths: [],
+  };
+  return `<div class="platform-content">
+    <div class="section-heading compact"><div>
+      <span class="eyebrow">REMOTE READ-ONLY TOOLS</span><h1>MCP</h1>
+      <p>平台只连接已经运行的 Streamable HTTP Endpoint。连接测试、只读校验、Tool 白名单、Agent 绑定和运行配置随 Release 固定；平台不会下载或安装 MCP。</p>
+    </div>${current ? `<button class="ghost-button" data-action="new-mcp">新建 MCP</button>` : ""}</div>
+    ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
+    <form class="capability-form" id="mcp-form">
+      <label><span>MCP 名称</span><input name="name" maxlength="120" value="${escapeHtml(current?.name || "")}" required /></label>
+      <label><span>Git 源地址</span><input name="git_url" type="url" value="${escapeHtml(current?.git_url || "")}" required /></label>
+      <label><span>固定 Commit / Tag / 镜像版本</span><input name="version_ref" value="${escapeHtml(current?.version_ref || "")}" required /></label>
+      <label><span>Endpoint</span><input name="endpoint" type="url" value="${escapeHtml(current?.endpoint || "")}" required /></label>
+      <label><span>Transport</span><select name="transport"><option value="STREAMABLE_HTTP">STREAMABLE_HTTP</option></select></label>
+      <label><span>鉴权类型</span><select name="auth_type"><option value="NONE" ${current?.auth_type === "BEARER" ? "" : "selected"}>NONE</option><option value="BEARER" ${current?.auth_type === "BEARER" ? "selected" : ""}>BEARER</option></select></label>
+      <label class="full"><span>Bearer Secret（仅服务端保存，不回显）</span><input name="auth_value" type="password" autocomplete="new-password" /></label>
+      <label><span>允许绑定的只读 Tool（逗号或换行）</span><textarea name="allowed_tools" rows="4" required>${escapeHtml((current?.allowed_tools || []).join("\n"))}</textarea></label>
+      <label><span>显式只读声明（逗号或换行）</span><textarea name="declared_read_only_tools" rows="4" required>${escapeHtml((current?.declared_read_only_tools || []).join("\n"))}</textarea></label>
+      <label class="full"><span>通用运行配置 JSON</span><textarea name="runtime_config" rows="12" required>${escapeHtml(JSON.stringify(runtimeConfig, null, 2))}</textarea></label>
+      <fieldset class="full"><legend>绑定垂直 Agent</legend>
+        ${[["general-service", "一般客服"], ["complaint-service", "投诉客服"], ["work-order-service", "工单处理"]]
+          .map(([id, name]) => `<label><input type="checkbox" name="agent_ids" value="${id}" ${checked.has(id) ? "checked" : ""} /> ${name}</label>`).join("")}
+      </fieldset>
+      <div class="form-actions full"><button>${current ? "保存配置" : "创建 Draft"}</button>${current ? `<button type="button" class="secondary" data-action="cancel-mcp-edit">取消编辑</button>` : ""}</div>
+    </form>
+    <div class="capability-list">${state.mcpServers.length ? state.mcpServers.map(mcpCard).join("") : `<div class="run-empty">还没有 MCP Server。</div>`}</div>
+    ${state.mcpToolResult ? `<section class="detail-card"><h3>Tool 实际调用结果</h3><pre>${escapeHtml(JSON.stringify(state.mcpToolResult, null, 2))}</pre></section>` : ""}
+  </div>`;
+}
+
+function mcpCard(server) {
+  const test = server.last_test || {};
+  const refs = (server.release_refs || []).map((item) => `${item.version} (${item.status})`).join("、") || "尚未进入 Release";
+  return `<article class="capability-card">
+    <div class="capability-card-head"><div><span class="status ${server.status.toLowerCase()}">${escapeHtml(server.status)}</span><h3>${escapeHtml(server.name)}</h3></div><small>${escapeHtml(server.id)}</small></div>
+    <div class="trace-summary">
+      ${fact("Git 源", server.git_url)}${fact("固定版本", server.version_ref)}
+      ${fact("Endpoint", server.endpoint)}${fact("Transport", server.transport)}
+      ${fact("鉴权", server.auth_type)}${fact("连接状态", server.status)}
+      ${fact("最近测试", formatTime(server.last_test_at))}${fact("测试耗时", test.latency_ms != null ? `${test.latency_ms} ms` : "—")}
+      ${fact("初始化", test.initialize_success === true ? "成功" : test.initialize_success === false ? "失败" : "未测试")}
+      ${fact("Tool List", test.tools_list_success === true ? `成功，共 ${test.tool_count} 个` : test.tools_list_success === false ? "失败" : "未测试")}
+      ${fact("允许的只读 Tool", (server.allowed_tools || []).join("、"))}
+      ${fact("绑定 Agent", (server.agent_ids || []).map((id) => agentName(id)).join("、") || "未绑定")}
+      ${fact("所属 Release", refs)}
+    </div>
+    ${test.error ? `<div class="validation-errors"><p>${escapeHtml(test.error)}</p></div>` : ""}
+    <details><summary>Tool 清单与读写属性</summary><pre>${escapeHtml(JSON.stringify(server.tools || [], null, 2))}</pre></details>
+    <details><summary>被拒绝的 Tool（${(server.rejected_tools || []).length}）</summary><pre>${escapeHtml(JSON.stringify(server.rejected_tools || [], null, 2))}</pre></details>
+    <details><summary>连接测试完整结果</summary><pre>${escapeHtml(JSON.stringify(test, null, 2))}</pre></details>
+    <form class="import-form mcp-tool-test-form" data-mcp-id="${server.id}">
+      <label><span>白名单 Tool</span><select name="tool_name">${(server.allowed_tools || []).map((name) => `<option>${escapeHtml(name)}</option>`).join("")}</select></label>
+      <label><span>参数 JSON</span><textarea name="arguments" rows="4">{}</textarea></label><button>实际调用</button>
+    </form>
+    <div class="card-actions"><button class="secondary" data-mcp-action="edit" data-mcp-id="${server.id}">编辑</button><button class="secondary" data-mcp-action="test" data-mcp-id="${server.id}">连接测试</button><button class="secondary" data-mcp-action="disable" data-mcp-id="${server.id}">停用</button></div>
+  </article>`;
+}
+
 const eventLabels = {
   run_started: "Run 开始",
   user_message_received: "收到用户请求",
@@ -437,6 +507,15 @@ const eventLabels = {
   rag_retrieval_requested: "RAG 检索请求",
   rag_retrieval_completed: "RAG 关键词 / 向量 / 混合召回",
   rag_citation_validation: "RAG 引用校验",
+  mcp_input_completeness_check: "MCP 信息完整性检查",
+  mcp_input_completeness_completed: "MCP 信息完整性检查完成",
+  mcp_input_completeness_failed: "MCP 信息完整性检查失败",
+  mcp_clarification_requested: "MCP 集中追问",
+  mcp_tool_selected: "MCP Tool 选择",
+  mcp_parameters_extracted: "MCP 参数提取",
+  mcp_request: "MCP 请求",
+  mcp_response: "MCP 响应",
+  mcp_binding_rejected: "MCP 绑定拒绝",
   assistant_response_completed: "客服回答完成",
   done: "Run 完成",
   error: "Run 失败",
@@ -475,6 +554,23 @@ function snapCard(snap) {
   </div>`;
 }
 
+function mcpSnapCard(snap) {
+  return `<div class="snap-card">
+    <div class="snap-title"><strong>MCPCallSnap · ${escapeHtml(snap.server_name)}</strong><span class="status ${snap.status === "SUCCESS" ? "done" : "error"}">${escapeHtml(snap.status)}</span></div>
+    <div class="snap-grid">
+      ${fact("Server / Tool", `${snap.server_name} / ${snap.tool_name}`)}
+      ${fact("Git 版本", `${snap.git_url} @ ${snap.version_ref}`)}
+      ${fact("Endpoint", snap.endpoint)}${fact("Transport", snap.transport)}
+      ${fact("调用时间", `${formatTime(snap.started_at)} → ${formatTime(snap.finished_at)}`)}
+      ${fact("延迟", `${snap.latency_ms} ms`)}${fact("结果长度", String(snap.result_length))}
+      ${fact("模型 API 成本", formatCny(snap.model_api_cost))}${fact("Release", snap.release_id)}
+    </div>
+    ${snap.error_message ? `<div class="validation-errors"><p>${escapeHtml(snap.error_message)}</p></div>` : ""}
+    <details><summary>请求参数</summary><pre>${escapeHtml(JSON.stringify(snap.request_args, null, 2))}</pre></details>
+    <details><summary>返回结果摘要</summary><pre>${escapeHtml(JSON.stringify(snap.result_summary, null, 2))}</pre></details>
+  </div>`;
+}
+
 function eventPayload(event) {
   const payload = event.payload || {};
   if (event.event_type === "user_message_received") {
@@ -510,6 +606,7 @@ function messageEvidence(detail) {
 
 function runSummary(detail) {
   const snaps = detail.cloud_call_snaps || [];
+  const mcpSnaps = detail.mcp_call_snaps || [];
   const totals = snaps.reduce(
     (sum, snap) => ({
       miss: sum.miss + (Number.isInteger(snap.prompt_cache_miss_tokens) ? snap.prompt_cache_miss_tokens : 0),
@@ -523,6 +620,7 @@ function runSummary(detail) {
     <div class="trace-summary">
       ${fact("垂直 Agent", agentName(detail.run.agent_id))}
       ${fact("云 API 调用", String(snaps.length))}
+      ${fact("MCP Tool 调用", String(mcpSnaps.length))}
       ${fact("输入未命中", String(totals.miss))}
       ${fact("输入命中", String(totals.hit))}
       ${fact("输出 Token", String(totals.output))}
@@ -568,6 +666,7 @@ function runDetailContent(detail) {
           .join("")}
       </ol>
     </section>
+    ${(detail.mcp_call_snaps || []).length ? `<section class="trace-section"><h3>MCP 调用快照</h3>${detail.mcp_call_snaps.map(mcpSnapCard).join("")}</section>` : ""}
     ${runSummary(detail)}
   </div>`;
 }
@@ -629,16 +728,19 @@ function platformPage() {
       <button data-platform-section="rag" class="${
         state.platformSection === "rag" ? "active" : ""
       }">RAG</button>
+      <button data-platform-section="mcp" class="${
+        state.platformSection === "mcp" ? "active" : ""
+      }">MCP</button>
       <button data-platform-section="runs" class="${
         state.platformSection === "runs" ? "active" : ""
       }">Run 与 Trace</button>
       <div class="later-list">
         <span>后续版本</span>
-        <p>Agent · MCP</p>
+        <p>Agent 编排</p>
         <p>Badcase · 成本治理</p>
       </div>
     </aside>
-    ${state.platformSection === "release" ? releasePanel() : state.platformSection === "skills" ? skillPanel() : state.platformSection === "rag" ? ragPanel() : runsPanel()}
+    ${state.platformSection === "release" ? releasePanel() : state.platformSection === "skills" ? skillPanel() : state.platformSection === "rag" ? ragPanel() : state.platformSection === "mcp" ? mcpPanel() : runsPanel()}
   </section>`;
 }
 
@@ -732,6 +834,19 @@ function bindEvents() {
   document.querySelectorAll(".rag-query-form").forEach((form) => {
     form.addEventListener("submit", testRagRetrieval);
   });
+  document.querySelector("#mcp-form")?.addEventListener("submit", saveMcpServer);
+  document.querySelectorAll("[data-mcp-action]").forEach((button) => {
+    button.addEventListener("click", () => mcpAction(button.dataset.mcpId, button.dataset.mcpAction));
+  });
+  document.querySelectorAll(".mcp-tool-test-form").forEach((form) => {
+    form.addEventListener("submit", testMcpTool);
+  });
+  document.querySelector("[data-action='new-mcp']")?.addEventListener("click", () => {
+    state.editingMcp = null; render();
+  });
+  document.querySelector("[data-action='cancel-mcp-edit']")?.addEventListener("click", () => {
+    state.editingMcp = null; render();
+  });
   document.querySelectorAll("[data-release-id]").forEach((button) => {
     button.addEventListener("click", () =>
       changeActive(button.dataset.releaseId, button.dataset.releaseAction),
@@ -780,9 +895,58 @@ async function loadPlatform() {
     ]);
   } else if (state.platformSection === "rag") {
     state.ragDocuments = await api("/api/rag/documents");
+  } else if (state.platformSection === "mcp") {
+    state.mcpServers = await api("/api/mcp/servers");
   } else {
     state.runs = await api("/api/runs");
   }
+}
+
+function mcpList(value) {
+  return String(value || "").split(/[\n,，]/).map((item) => item.trim()).filter(Boolean);
+}
+
+async function saveMcpServer(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const payload = {
+    name: form.get("name"), git_url: form.get("git_url"), version_ref: form.get("version_ref"),
+    endpoint: form.get("endpoint"), transport: form.get("transport"), auth_type: form.get("auth_type"),
+    auth_value: form.get("auth_value"), allowed_tools: mcpList(form.get("allowed_tools")),
+    declared_read_only_tools: mcpList(form.get("declared_read_only_tools")),
+    agent_ids: form.getAll("agent_ids"), runtime_config: JSON.parse(form.get("runtime_config")),
+  };
+  const editingId = state.editingMcp?.id;
+  await api(editingId ? `/api/mcp/servers/${editingId}` : "/api/mcp/servers", {
+    method: editingId ? "PUT" : "POST", body: JSON.stringify(payload),
+  });
+  state.editingMcp = null;
+  state.notice = "MCP 配置已保存；连接测试通过并随候选 Release 发布前，不影响在线运行。";
+  await loadPlatform(); render();
+}
+
+async function mcpAction(serverId, action) {
+  if (action === "edit") {
+    state.editingMcp = state.mcpServers.find((item) => item.id === serverId) || null;
+    render(); return;
+  }
+  const result = await api(`/api/mcp/servers/${serverId}/${action}`, { method: "POST" });
+  state.notice = action === "test"
+    ? (result.status === "CONNECTED" ? `连接与 Tool List 成功：允许 ${result.allowed_tools.length} 个只读 Tool，拒绝 ${result.rejected_tools.length} 个 Tool。` : `连接测试失败：${result.last_test?.error || "请查看完整结果"}`)
+    : "MCP 已停用并解绑；发布下一 Release 后新消息不再调用，历史 Run 快照保留。";
+  await loadPlatform(); render();
+}
+
+async function testMcpTool(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  state.mcpToolResult = await api(`/api/mcp/servers/${event.currentTarget.dataset.mcpId}/tool-test`, {
+    method: "POST", body: JSON.stringify({
+      tool_name: form.get("tool_name"), arguments: JSON.parse(form.get("arguments")),
+    }),
+  });
+  state.notice = "白名单 Tool 已真实调用；结果仅用于连接页测试，不改变 Release。";
+  render();
 }
 
 function ragFormPayload(formElement) {

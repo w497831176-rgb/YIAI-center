@@ -238,6 +238,55 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunks_version ON rag_chunks(rag_version_id, 
 """
 
 
+MIGRATION_5 = """
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    git_url TEXT NOT NULL,
+    version_ref TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    transport TEXT NOT NULL CHECK(transport IN ('STREAMABLE_HTTP')),
+    auth_type TEXT NOT NULL CHECK(auth_type IN ('NONE','BEARER')),
+    auth_value TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK(status IN ('DRAFT','CONNECTED','FAILED','DISABLED')),
+    allowed_tools_json TEXT NOT NULL,
+    declared_read_only_tools_json TEXT NOT NULL,
+    tools_json TEXT NOT NULL,
+    rejected_tools_json TEXT NOT NULL,
+    agent_ids_json TEXT NOT NULL,
+    runtime_config_json TEXT NOT NULL,
+    last_test_at TEXT,
+    last_test_json TEXT NOT NULL,
+    validation_errors_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mcp_call_snaps (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    release_id TEXT NOT NULL REFERENCES releases(id),
+    server_id TEXT NOT NULL,
+    server_name TEXT NOT NULL,
+    git_url TEXT NOT NULL,
+    version_ref TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    transport TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    request_args_json TEXT NOT NULL,
+    result_summary_json TEXT NOT NULL,
+    result_length INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('SUCCESS','FAILED')),
+    error_message TEXT,
+    model_api_cost REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_servers_updated ON mcp_servers(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mcp_calls_run ON mcp_call_snaps(run_id, started_at);
+"""
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "router": {
         "id": "router-default",
@@ -280,6 +329,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "skills": [],
     "rag": [],
+    "mcp": [],
 }
 
 
@@ -312,6 +362,13 @@ def init_db() -> None:
             conn.executescript(MIGRATION_4)
             conn.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES(4, ?)",
+                (now_iso(),),
+            )
+            applied.add(4)
+        if 5 not in applied:
+            conn.executescript(MIGRATION_5)
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(5, ?)",
                 (now_iso(),),
             )
         count = conn.execute("SELECT COUNT(*) AS n FROM releases").fetchone()["n"]
@@ -717,6 +774,239 @@ def disable_skill(skill_id: str) -> dict[str, Any]:
     return get_skill(skill_id)
 
 
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+
+
+def _mcp_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    runtime_config = payload.get("runtime_config")
+    if not isinstance(runtime_config, dict):
+        runtime_config = {}
+    return {
+        "name": str(payload.get("name", "")).strip(),
+        "git_url": str(payload.get("git_url", "")).strip(),
+        "version_ref": str(payload.get("version_ref", "")).strip(),
+        "endpoint": str(payload.get("endpoint", "")).strip(),
+        "transport": str(payload.get("transport", "STREAMABLE_HTTP")).strip().upper(),
+        "auth_type": str(payload.get("auth_type", "NONE")).strip().upper(),
+        "auth_value": str(payload.get("auth_value", "")),
+        "allowed_tools": _string_list(payload.get("allowed_tools")),
+        "declared_read_only_tools": _string_list(payload.get("declared_read_only_tools")),
+        "agent_ids": _string_list(payload.get("agent_ids")),
+        "runtime_config": runtime_config,
+    }
+
+
+def _mcp_validation_errors(values: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if not values["name"] or len(values["name"]) > 120:
+        errors.append("name is required and must not exceed 120 characters")
+    if not values["git_url"].startswith("https://") or len(values["git_url"]) > 500:
+        errors.append("git_url must be a public HTTPS URL")
+    if not values["version_ref"] or len(values["version_ref"]) > 160:
+        errors.append("version_ref is required")
+    endpoint = values["endpoint"]
+    if not endpoint.startswith(("http://", "https://")) or "@" in endpoint.split("//", 1)[-1].split("/", 1)[0]:
+        errors.append("endpoint must be HTTP(S) and must not contain credentials")
+    if values["transport"] != "STREAMABLE_HTTP":
+        errors.append("only STREAMABLE_HTTP transport is supported")
+    if values["auth_type"] not in {"NONE", "BEARER"}:
+        errors.append("auth_type must be NONE or BEARER")
+    if values["auth_type"] == "BEARER" and not values["auth_value"]:
+        errors.append("BEARER authentication requires a secret")
+    if not values["allowed_tools"]:
+        errors.append("at least one allowed Tool is required")
+    if not set(values["allowed_tools"]).issubset(set(values["declared_read_only_tools"])):
+        errors.append("every allowed Tool must be explicitly declared read-only")
+    allowed_agents = {agent["id"] for agent in DEFAULT_CONFIG["agents"]}
+    if any(agent_id not in allowed_agents for agent_id in values["agent_ids"]):
+        errors.append("agent_ids contains an unknown vertical Agent")
+    if len(json.dumps(values["runtime_config"], ensure_ascii=False)) > 20000:
+        errors.append("runtime_config exceeds 20000 characters")
+    return errors
+
+
+def save_mcp_server(payload: dict[str, Any], server_id: str | None = None) -> dict[str, Any]:
+    values = _mcp_payload(payload)
+    errors = _mcp_validation_errors(values)
+    timestamp = now_iso()
+    with connection() as conn:
+        current = None
+        if server_id is None:
+            server_id = new_id("mcp")
+            created_at = timestamp
+            tools: list[dict[str, Any]] = []
+            rejected: list[dict[str, Any]] = []
+            last_test: dict[str, Any] = {}
+            last_test_at = None
+            status = "DRAFT"
+        else:
+            current = conn.execute("SELECT * FROM mcp_servers WHERE id=?", (server_id,)).fetchone()
+            if current is None:
+                raise KeyError(server_id)
+            created_at = current["created_at"]
+            tools = json.loads(current["tools_json"])
+            rejected = json.loads(current["rejected_tools_json"])
+            last_test = json.loads(current["last_test_json"])
+            last_test_at = current["last_test_at"]
+            connection_keys = (
+                "endpoint", "transport", "auth_type", "auth_value",
+                "allowed_tools_json", "declared_read_only_tools_json",
+            )
+            proposed = {
+                "endpoint": values["endpoint"],
+                "transport": values["transport"],
+                "auth_type": values["auth_type"],
+                "auth_value": values["auth_value"],
+                "allowed_tools_json": json.dumps(values["allowed_tools"], ensure_ascii=False),
+                "declared_read_only_tools_json": json.dumps(values["declared_read_only_tools"], ensure_ascii=False),
+            }
+            unchanged = all(current[key] == proposed[key] for key in connection_keys)
+            status = current["status"] if unchanged and current["status"] == "CONNECTED" else "DRAFT"
+            if not unchanged:
+                tools, rejected, last_test, last_test_at = [], [], {}, None
+        if errors:
+            status = "DRAFT"
+        conn.execute(
+            """
+            INSERT INTO mcp_servers(
+                id, name, git_url, version_ref, endpoint, transport, auth_type, auth_value,
+                status, allowed_tools_json, declared_read_only_tools_json, tools_json,
+                rejected_tools_json, agent_ids_json, runtime_config_json, last_test_at,
+                last_test_json, validation_errors_json, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name, git_url=excluded.git_url, version_ref=excluded.version_ref,
+                endpoint=excluded.endpoint, transport=excluded.transport,
+                auth_type=excluded.auth_type, auth_value=excluded.auth_value,
+                status=excluded.status, allowed_tools_json=excluded.allowed_tools_json,
+                declared_read_only_tools_json=excluded.declared_read_only_tools_json,
+                tools_json=excluded.tools_json, rejected_tools_json=excluded.rejected_tools_json,
+                agent_ids_json=excluded.agent_ids_json, runtime_config_json=excluded.runtime_config_json,
+                last_test_at=excluded.last_test_at, last_test_json=excluded.last_test_json,
+                validation_errors_json=excluded.validation_errors_json, updated_at=excluded.updated_at
+            """,
+            (
+                server_id, values["name"], values["git_url"], values["version_ref"],
+                values["endpoint"], values["transport"], values["auth_type"], values["auth_value"],
+                status, json.dumps(values["allowed_tools"], ensure_ascii=False),
+                json.dumps(values["declared_read_only_tools"], ensure_ascii=False),
+                json.dumps(tools, ensure_ascii=False), json.dumps(rejected, ensure_ascii=False),
+                json.dumps(values["agent_ids"], ensure_ascii=False),
+                json.dumps(values["runtime_config"], ensure_ascii=False), last_test_at,
+                json.dumps(last_test, ensure_ascii=False), json.dumps(errors, ensure_ascii=False),
+                created_at, timestamp,
+            ),
+        )
+    return get_mcp_server(server_id)
+
+
+def record_mcp_test(server_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    timestamp = now_iso()
+    with connection() as conn:
+        current = conn.execute("SELECT * FROM mcp_servers WHERE id=?", (server_id,)).fetchone()
+        if current is None:
+            raise KeyError(server_id)
+        configured = json.loads(current["allowed_tools_json"])
+        observed = result.get("allowed_read_only_tools") or []
+        success = (
+            bool(result.get("initialize_success"))
+            and bool(result.get("tools_list_success"))
+            and not result.get("error")
+            and set(configured) == set(observed)
+        )
+        conn.execute(
+            """
+            UPDATE mcp_servers SET status=?, tools_json=?, rejected_tools_json=?,
+                last_test_at=?, last_test_json=?, validation_errors_json=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                "CONNECTED" if success else "FAILED",
+                json.dumps(result.get("tools") or [], ensure_ascii=False),
+                json.dumps(result.get("rejected_tools") or [], ensure_ascii=False),
+                timestamp, json.dumps(result, ensure_ascii=False),
+                json.dumps([] if success else [result.get("error") or "connection test failed"], ensure_ascii=False),
+                timestamp, server_id,
+            ),
+        )
+    return get_mcp_server(server_id)
+
+
+def disable_mcp_server(server_id: str) -> dict[str, Any]:
+    with connection() as conn:
+        if conn.execute("SELECT 1 FROM mcp_servers WHERE id=?", (server_id,)).fetchone() is None:
+            raise KeyError(server_id)
+        conn.execute(
+            "UPDATE mcp_servers SET status='DISABLED', agent_ids_json='[]', updated_at=? WHERE id=?",
+            (now_iso(), server_id),
+        )
+    return get_mcp_server(server_id)
+
+
+def _mcp_dict(row: sqlite3.Row) -> dict[str, Any]:
+    result = dict(row)
+    result.pop("auth_value", None)
+    for source, target in (
+        ("allowed_tools_json", "allowed_tools"),
+        ("declared_read_only_tools_json", "declared_read_only_tools"),
+        ("tools_json", "tools"),
+        ("rejected_tools_json", "rejected_tools"),
+        ("agent_ids_json", "agent_ids"),
+        ("runtime_config_json", "runtime_config"),
+        ("last_test_json", "last_test"),
+        ("validation_errors_json", "validation_errors"),
+    ):
+        result[target] = json.loads(result.pop(source))
+    return result
+
+
+def get_mcp_server(server_id: str) -> dict[str, Any]:
+    with connection() as conn:
+        row = conn.execute("SELECT * FROM mcp_servers WHERE id=?", (server_id,)).fetchone()
+        if row is None:
+            raise KeyError(server_id)
+        result = _mcp_dict(row)
+        refs: list[dict[str, Any]] = []
+        for release in conn.execute(
+            "SELECT id, version, status, config_json FROM releases ORDER BY created_at DESC"
+        ).fetchall():
+            config = json.loads(release["config_json"])
+            if any(item.get("server_id") == server_id for item in config.get("mcp", [])):
+                refs.append({"id": release["id"], "version": release["version"], "status": release["status"]})
+        result["release_refs"] = refs
+        return result
+
+
+def list_mcp_servers() -> list[dict[str, Any]]:
+    with connection() as conn:
+        ids = [row["id"] for row in conn.execute("SELECT id FROM mcp_servers ORDER BY updated_at DESC")]
+    return [get_mcp_server(server_id) for server_id in ids]
+
+
+def get_mcp_connection_config(server_id: str) -> dict[str, Any]:
+    with connection() as conn:
+        row = conn.execute(
+            """
+            SELECT endpoint, auth_type, auth_value, allowed_tools_json,
+                   declared_read_only_tools_json, runtime_config_json
+            FROM mcp_servers WHERE id=?
+            """,
+            (server_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(server_id)
+        result = dict(row)
+        result["allowed_tools"] = json.loads(result.pop("allowed_tools_json"))
+        result["declared_read_only_tools"] = json.loads(
+            result.pop("declared_read_only_tools_json")
+        )
+        result["runtime_config"] = json.loads(result.pop("runtime_config_json"))
+        return result
+
+
 def _candidate_config(conn: sqlite3.Connection, active_config: dict[str, Any]) -> dict[str, Any]:
     config = json.loads(json.dumps(active_config, ensure_ascii=False))
     rows = conn.execute(
@@ -773,6 +1063,35 @@ def _candidate_config(conn: sqlite3.Connection, active_config: dict[str, Any]) -
         }
         for row in rag_rows
     ]
+    mcp_rows = conn.execute(
+        """
+        SELECT * FROM mcp_servers
+        WHERE status='CONNECTED' AND agent_ids_json != '[]'
+        ORDER BY created_at, id
+        """
+    ).fetchall()
+    config["mcp"] = [
+        {
+            "server_id": row["id"],
+            "name": row["name"],
+            "git_url": row["git_url"],
+            "version_ref": row["version_ref"],
+            "endpoint": row["endpoint"],
+            "transport": row["transport"],
+            "auth_type": row["auth_type"],
+            "allowed_tools": json.loads(row["allowed_tools_json"]),
+            "tools": [
+                tool for tool in json.loads(row["tools_json"])
+                if tool.get("allowed") is True
+            ],
+            "rejected_tools": json.loads(row["rejected_tools_json"]),
+            "agent_ids": json.loads(row["agent_ids_json"]),
+            "runtime_config": json.loads(row["runtime_config_json"]),
+            "last_test_at": row["last_test_at"],
+            "last_test": json.loads(row["last_test_json"]),
+        }
+        for row in mcp_rows
+    ]
     return config
 
 
@@ -803,6 +1122,19 @@ def _save_release_bindings(conn: sqlite3.Connection, release_id: str, config: di
                     json.dumps(document, ensure_ascii=False),
                 ),
             )
+    for server in config.get("mcp", []):
+        for agent_id in server.get("agent_ids", []):
+            conn.execute(
+                """
+                INSERT INTO release_bindings(
+                    release_id, capability_type, component_version_id, agent_id, config_json
+                ) VALUES(?, 'MCP', ?, ?, ?)
+                """,
+                (
+                    release_id, server["server_id"], agent_id,
+                    json.dumps(server, ensure_ascii=False),
+                ),
+            )
 
 
 def get_release_detail(release_id: str) -> dict[str, Any]:
@@ -818,6 +1150,16 @@ def get_release_detail(release_id: str) -> dict[str, Any]:
     active_skills = ids(active["config"], "skills", "skill_version_id")
     target_rag = ids(target["config"], "rag", "rag_version_id")
     active_rag = ids(active["config"], "rag", "rag_version_id")
+    target_mcp = ids(target["config"], "mcp", "server_id")
+    active_mcp = ids(active["config"], "mcp", "server_id")
+    target_mcp_by_id = {item["server_id"]: item for item in target["config"].get("mcp", [])}
+    active_mcp_by_id = {item["server_id"]: item for item in active["config"].get("mcp", [])}
+    mcp_changed = {
+        server_id
+        for server_id in target_mcp & active_mcp
+        if json.dumps(target_mcp_by_id[server_id], ensure_ascii=False, sort_keys=True)
+        != json.dumps(active_mcp_by_id[server_id], ensure_ascii=False, sort_keys=True)
+    }
     target["diff"] = {
         "base_release_id": active_id,
         "skills_added": sorted(target_skills - active_skills),
@@ -826,6 +1168,10 @@ def get_release_detail(release_id: str) -> dict[str, Any]:
         "rag_added": sorted(target_rag - active_rag),
         "rag_removed": sorted(active_rag - target_rag),
         "rag_unchanged": sorted(target_rag & active_rag),
+        "mcp_added": sorted(target_mcp - active_mcp),
+        "mcp_removed": sorted(active_mcp - target_mcp),
+        "mcp_changed": sorted(mcp_changed),
+        "mcp_unchanged": sorted((target_mcp & active_mcp) - mcp_changed),
     }
     return target
 
@@ -946,6 +1292,31 @@ def save_cloud_snap(run_id: str, phase: str, snap: dict[str, Any]) -> None:
                     now_iso(),
                 ),
             )
+
+
+def save_mcp_call_snap(run_id: str, release_id: str, snap: dict[str, Any]) -> str:
+    snap_id = new_id("mcpcall")
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO mcp_call_snaps(
+                id, run_id, release_id, server_id, server_name, git_url, version_ref,
+                endpoint, transport, tool_name, request_args_json, result_summary_json,
+                result_length, started_at, finished_at, latency_ms, status,
+                error_message, model_api_cost
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snap_id, run_id, release_id, snap["server_id"], snap["server_name"],
+                snap["git_url"], snap["version_ref"], snap["endpoint"], snap["transport"],
+                snap["tool_name"], json.dumps(snap.get("request_args") or {}, ensure_ascii=False),
+                json.dumps(snap.get("result_summary") or {}, ensure_ascii=False),
+                int(snap.get("result_length") or 0), snap["started_at"], snap["finished_at"],
+                int(snap.get("latency_ms") or 0), snap["status"], snap.get("error_message"),
+                float(snap.get("model_api_cost") or 0),
+            ),
+        )
+    return snap_id
 
 
 def conversation_history(conversation_id: str, limit: int = 12) -> list[dict[str, str]]:
@@ -1105,6 +1476,15 @@ def get_run_detail(run_id: str) -> dict[str, Any]:
                 snap["estimated_cost"], snap["price_snapshot"]
             )
             snap["display_currency"] = "CNY"
+        mcp_snaps = rows_to_dicts(
+            conn.execute(
+                "SELECT * FROM mcp_call_snaps WHERE run_id=? ORDER BY started_at",
+                (run_id,),
+            ).fetchall()
+        )
+        for snap in mcp_snaps:
+            snap["request_args"] = json.loads(snap.pop("request_args_json"))
+            snap["result_summary"] = json.loads(snap.pop("result_summary_json"))
         run_result = dict(run)
         run_result["estimated_cost_cny"] = _run_cost_cny(conn, run_id)
         run_result["display_currency"] = "CNY"
@@ -1132,6 +1512,7 @@ def get_run_detail(run_id: str) -> dict[str, Any]:
             },
             "trace_events": events,
             "cloud_call_snaps": snaps,
+            "mcp_call_snaps": mcp_snaps,
         }
 
 

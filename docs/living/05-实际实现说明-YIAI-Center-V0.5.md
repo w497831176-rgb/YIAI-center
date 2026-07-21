@@ -1,6 +1,6 @@
 # YIAI Center 实际实现说明
 
-> 当前版本：V0.5.8  
+> 当前版本：V0.5.9
 > 文档性质：Living Implementation Doc（动态实现记忆）  
 > 用途：对照产品、架构和版本规划，说明代码事实上怎样运行、为什么这样实现、当前没做什么  
 > 当前部署：已部署并通过后端自测  
@@ -16,7 +16,7 @@
 
 ## 1. 当前交付结论
 
-V0.5.0—V0.5.8 已形成一个可以真实演示的最小闭环：
+V0.5.0—V0.5.9 已形成一个可以真实演示的最小闭环：
 
 1. 打开一个无登录、无行业迹象的三 TAB 页面。
 2. 用户发送一条消息。
@@ -37,6 +37,10 @@ V0.5.0—V0.5.8 已形成一个可以真实演示的最小闭环：
 17. 页面可粘贴纯文本或 Markdown，预览确定性切片并保存不可变 RAGVersion。
 18. 每个文档同时建立 SQLite FTS5/BM25 索引与本地 TF-IDF/LSA 潜语义向量，再用固定 RRF 融合。
 19. 只有校验、绑定并随 Release 发布的 RAGVersion 才进入新 Run；Trace 保留实际 Chunk、分数、引用、注入长度和 Release 快照。
+20. 平台可以保存、测试和展示多个远程 MCP Server，并以只读 Tool 白名单绑定垂直 Agent。
+21. MCP 绑定随 Candidate Diff 和人工发布生效；同一历史会话的新消息使用新 MCP，旧 Run 保留旧快照。
+22. Runtime 真实执行 Streamable HTTP Tool，并分别保存 MCP 零模型成本 Snap 与 DeepSeek 真实 Token／人民币成本 Snap。
+23. 命语上游在独立容器中固定 commit 部署，平台只连接 Endpoint；聊天主链路没有命理专用分支。
 
 当前访问地址：
 
@@ -45,7 +49,7 @@ V0.5.0—V0.5.8 已形成一个可以真实演示的最小闭环：
 当前 GitHub：
 
 - `https://github.com/w497831176-rgb/YIAI-center`。
-- V0.5.8 核心实现提交：`ca7b0f0`；Living Docs 在后续提交持续同步。
+- V0.5.8 核心实现提交：`ca7b0f0`；V0.5.9 最终提交见本次 Git 发布记录。
 
 ## 2. 产品规划如何落地
 
@@ -555,8 +559,8 @@ Run 与 Trace：
 - 首页：HTTP 200。
 - SQLite：存在并在容器重建后保留 Run。
 - `immich_machine_learning`：running。
-- 数据库迁移版本：4；V0.5.8 部署前副本为 `data/yiai-center.sqlite.pre-v058-20260721`。
-- Active Release：`V0.5.8-rag-demo`。
+- 数据库迁移版本：5；V0.5.9 部署前副本为 `data/yiai-center.sqlite.pre-v059-20260721`。
+- Active Release：`V0.5.9-mcp-docs-hot-swap`。
 
 ## 11. 与产品和架构 Y/N 的对照结论
 
@@ -589,7 +593,6 @@ Run 与 Trace：
 以下功能仍是产品全局中的后续规划，不是 V0.5.5 已完成功能：
 
 - Agent 配置编辑页面。
-- 远程只读 MCP。
 - 工单真实读写 Tool。
 - 写操作确认和幂等回执。
 - 人机共驾。
@@ -632,7 +635,7 @@ Trace 证明：
 
 - Skill：`skill_029d70e05b8146b68eed17a1107e8845`。
 - SkillVersion：`skillv_e14783966d0f49ef80dc354faa367082`。
-- Candidate／当前 Active Release：`rel_9194ba42cc254102b6f46017908f92ca`／`V0.5.6-skill-demo`。
+- Candidate／当时 Active Release：`rel_9194ba42cc254102b6f46017908f92ca`／`V0.5.6-skill-demo`。
 - 发布前 Run：`run_dfe0fa51b40940a187d6fa66ab160267`，无 Skill 激活。
 - 发布后同会话 Run：`run_80e84830fb3b455b839869a6f9a962af`，Trace 固定上述 SkillVersion，回答遵循正文，2 个真实 V4-Flash Snap，总成本 `0.000797328 CNY`。
 
@@ -651,12 +654,73 @@ Trace 证明：
 - 同会话发布后 Run：`run_1a2a5d2a4b5f4e81b8d776c939f3565b`，Router 只选一般客服，召回 4 个真实切片、实际使用 2 个合法引用、注入 1408 字符；主 Agent 输入未命中 1237、命中 0、输出 325 Token；Run 总成本 `0.002268 CNY`。
 - RAG 检索步骤没有云模型调用并明确记录成本 0；两次 DeepSeek 调用的 Token、单价快照和人民币成本仍分别保存在 CloudCallSnap。
 
-## 17. 下一版本如何继续
+## 17. V0.5.9 MCP Server 选择与部署记录
 
-开始 V0.5.9 前：
+### 17.1 命语紫微斗数排盘 MCP
 
-1. 产品负责人先完成 04 文档的三条手动体验。
-2. 修复任何阻塞 V0.5.5 演示的问题。
-3. 重新阅读 01—05。
-4. 以产品负责人的 V0.5.9 补充授权覆盖旧路线图中的单一 MCP 范围。
-5. 先独立部署并固定命语紫微斗数 MCP commit，再实现平台通用远程 MCP Client、只读白名单、Release 绑定、真实 Run Trace 与热拔插。
+- Git：`https://github.com/Brhiza/mingyu`。
+- 选择原因：产品负责人指定的 V0.5.9 核心计算型只读 MCP；真实结构化结果可人工核对，无云模型副作用。
+- 固定 commit：`8e24d474d25d52d8b33533fe6e4dbc50aae6d9c8`；上游版本 `0.1.0`，Adapter 对外版本 `0.1.0+8e24d47`。
+- 原生 Transport：stdio；已在独立服务侧增加最小 Streamable HTTP Adapter。Adapter 复用并注册上游所有 Tool，实现中没有复制或重写算法。
+- 独立目录：`D:\Docker\yiai-mcp-mingyu`；Compose project／容器：`yiai-mcp-mingyu`；端口：`19120:3001`；Endpoint：`http://192.168.50.232:19120/mcp`。
+- 构建固定 Node `22.17.0`、Node tarball SHA-256 `325c0f1261e0c61bcae369a1274028e9cfb7ab7949c05512c5b1e630f7e80e12` 和 `pnpm@11.9.0`。
+- 连接测试返回 56 个 Tool；平台白名单只包含 `ziwei_calculate`。其余 55 个均被拒绝，包括 `ziwei_prompt`、八字、六爻、塔罗、择日、星盘和提示词类 Tool。
+- 交付仓库中的 `deployments/mcp/mingyu/` 仅用于复现独立服务；YIAI Center Dockerfile／Compose 不引用该目录。
+
+### 17.2 MCP 官方文档远程 Server
+
+- Git/source：`https://github.com/modelcontextprotocol/servers`；Endpoint：`https://modelcontextprotocol.io/mcp`。
+- 选择原因：官方已部署的第三方 Streamable HTTP Server，用于证明平台可以连接外部 Endpoint。
+- 固定平台记录：`remote-service-2026-07-21`；initialize 报告服务版本 `1.0.0`。该外部托管服务没有可由本项目固定的容器镜像，平台同时保存测试时间和 Tool Schema hash。
+- 原生支持 Streamable HTTP，没有 Transport Adapter。
+- Tool List 共 3 个；白名单只包含 `search_model_context_protocol`。`query_docs_filesystem_model_context_protocol` 和 `submit_feedback` 均未开放，其中后者不具备只读证据。
+- 外部网络经项目容器代理偶发断连；失败 Snap 和成功重试都保留，未把失败伪装成成功。
+
+### 17.3 未接入候选
+
+- Time MCP 被产品负责人后续指定的命语核心要求替代，不作为本版核心验收。
+- GitHub 官方 MCP 因没有独立的最小只读 Token 未部署，不复用代码推送凭据，也不阻塞前两个 Server。
+- Fetch MCP 未启用，避免未实现域名／内网访问限制时扩大读取范围。
+
+## 18. 平台通用 MCP 实现
+
+- 第五号前向迁移新增 `mcp_servers` 和 `mcp_call_snaps`；没有重建历史业务表。
+- `mcp_client.py` 实现通用 Streamable HTTP JSON／SSE 解析、Session、initialize、notifications/initialized、tools/list、tools/call、响应长度限制和错误归一化。
+- 连接测试同时保存初始化、Tool List、数量、允许、拒绝、耗时、错误、时间、serverInfo、协议版本、完整 Schema 与 hash。
+- Candidate 只收录状态 CONNECTED 且已绑定 Agent 的 Server，并复制 Git／版本／Endpoint／白名单／Tool Schema／拒绝列表／运行配置；`release_bindings` 使用能力类型 `MCP`。
+- Runtime 只读取 Release 数据，通过通用激活词、业务说明、Tool Schema、默认参数和声明式正则／范围映射提取参数；没有“紫微斗数”代码分支。
+- Tool 调用前再次校验 Server、Agent 绑定、允许名称、Schema 必填／类型／枚举／范围；MCP 结果以配置中的字段路径压缩后注入 DeepSeek。
+- MCP Snap 明确 `model_api_cost=0`；DeepSeek 预检、Router 和主回答分别保存真实 CloudCallSnap。缺失 Usage 仍按既有契约返回 null，不补零。
+- 页面 MCP 卡片展示来源、版本、Endpoint、Transport、鉴权、状态、测试、Tool 读写属性、白名单、拒绝项、Agent、Release 和实际 Tool 测试；Run 抽屉展示 MCP Snap。
+
+## 19. 命语参数与回答实现
+
+- Release 配置保存出生字段要求、集中追问、参数示例、声明式提取器、时辰范围映射、结果字段路径和回答规则。
+- 原始小时／分钟保存在参数提取 Trace；7:35 通过 Release 范围映射得到 `timeIndex=4`。最终请求字段按真实 Tool Schema 使用 `isLeapMonth`，不向 Tool 发送未知字段。
+- 指定输入的最终验收请求包含 `gender=female`、`dateType=solar`、`year=1992`、`month=8`、`day=21`、`timeIndex=4`、`useTrueSolarTime=false`、`isLeapMonth=false` 和 `promptScope=full`。
+- 只排盘时主回答 Prompt 要求只组织真实结果、不增加命理解读；结果摘要保留基本信息、命宫、身宫、五行局、四化、十二宫、大限和流年字段。
+- 用户要求进一步解读时仍只依据同一个 `ziwei_calculate` 结果；`ziwei_prompt` 未进入 Release，Runtime 无法选择它。
+
+## 20. Release、Run 与热拔插证据
+
+- 命语 Acceptance Release：`rel_8e71df9301be4b7e936941ceda531bb4`／`V0.5.9-mcp-mingyu-acceptance`，绑定命语到 `general-service`。
+- 核心 Run：`run_c6a864bd64d04ed3b6d124fd6623dc78`，Conversation `conv_98cad63e288b4cd6abb1c759ee744399`；只调用 `ziwei_calculate`，返回长度 3,642,960，延迟 3,563 ms，MCP 成本 0，回答 992 字符。
+- 核心 Run 的主回答 CloudCallSnap：输入未命中 144、缓存命中 4,096、输出 1,313 Token，成本 `0.00287473536 CNY`；Run 总成本 `0.00302549184 CNY`。
+- 信息不足 Run：`run_312f2d79fc564ae4bb8a547e5cf6f38a`，0 个 MCP Snap，只返回指定集中追问。
+- 热切换 Release：`rel_da9c4e8d8eb540ed89c6738bdc7b9252`／`V0.5.9-mcp-docs-hot-swap`；Diff 移除命语并增加官方文档，人工发布。
+- 同一 Conversation 的新 Run：`run_fccbf50fe28c4fbba496114ddf4102f9`，调用 `search_model_context_protocol`，结果长度 14,790，延迟 1,455 ms，MCP 成本 0；旧命语 Run 保持原 Release 和参数快照。
+- B 发布后再次请求命语的 Run `run_be2cd695fba14a959f4121165cacff86` 没有 MCP Snap，证明命语不再进入新运行。
+- 切换前后应用容器 ID／创建时间均为 `5dacb53d75e15e1f0bc089fc7d0494a8376f3a20198dc26032f9e22aa5088a26`／`2026-07-21T02:11:36.752366345Z`；没有修改聊天代码、重建应用容器或影响 Immich。
+
+## 21. 异常证据与当前部署
+
+- 外部官方 Endpoint 的一次真实失败 Run `run_3bcc57cf46834e5b99f27dcfc423a432` 保存 FAILED MCP Snap、`URLError` 和降级回答；成功重试形成独立新 Run，没有删除失败记录。
+- `/api/health` 为 V0.5.9；数据库迁移版本 5；部署前副本 `data/yiai-center.sqlite.pre-v059-20260721`。
+- YIAI Center、`yiai-mcp-mingyu` 和 `immich_machine_learning` 最终均 healthy。
+- 当前 Active Release 为 `V0.5.9-mcp-docs-hot-swap`；命语 Server 记录仍为 CONNECTED 但未绑定，历史 Run 可查看。
+
+## 22. 下一版本如何继续
+
+1. 产品负责人完成 04 文档中的 V0.5.9 页面手动体验。
+2. 若存在阻塞问题，保持 V0.5.9 纠偏，不改变已通过的 Release／Trace／成本契约。
+3. 手动体验通过后开始 V0.5.10 工单只读。

@@ -1,7 +1,7 @@
 # YIAI Center 架构全局 Y/N
 
-> 当前版本：V0.5.8  
-> 最近复核：2026-07-21，已启用第四号前向迁移与真实 BM25／本地 LSA／RRF 检索  
+> 当前版本：V0.5.9
+> 最近复核：2026-07-21，已启用第五号前向迁移、通用 Streamable HTTP Client、MCP 快照与 Release 热切换
 > 文档视角：系统架构与后端工程  
 > 文档性质：Living Doc（动态工作记忆），不是不可变技术规范  
 > 用途：回答“技术上必须怎样实现、哪些权威只能有一个、哪些实现绝对禁止”  
@@ -712,7 +712,7 @@ error
 - [N] 一个 Run 多 Agent。
 - [N] conversation 永久固定旧 Release。
 - [N] Git Skill 脚本执行。
-- [N] Git MCP 源码部署。
+- [N] YIAI Center 平台内从 Git 部署 MCP 源码；独立部署层可由获授权的交付动作固定版本部署。
 - [N] 远程动态写 MCP。
 - [N] 写 Tool 绕过确认。
 - [N] CloudCallSnap 聚合后丢失逐次调用。
@@ -723,3 +723,17 @@ error
 - [N] 破坏持久化数据的修复命令。
 
 在文档尚未更新前，任何当前禁区被静默突破，版本不得标记完成。经产品负责人确认并更新基线后，应按新 Y/N 判断，不再受旧条目约束。
+
+## 24. V0.5.9 MCP 两层架构实测边界
+
+- [Y] MCP Server 部署层使用独立目录、Compose project、容器和端口；不得进入 YIAI Center 应用镜像或 Compose project。
+- [Y] stdio 上游可以在独立服务侧增加最小 Streamable HTTP Adapter；Adapter 只注册上游 Tool，不复制或重写业务算法。
+- [Y] 上游 Git commit、运行时版本和下载校验值固定，容器启动不拉取 `main`。
+- [Y] 平台层只保存远程 Endpoint、固定版本、Tool Schema hash、只读声明、白名单、Agent 绑定、测试结果和运行配置。
+- [Y] `mcp_servers` 是可编辑 Control Plane 事实；Candidate 将当时配置复制进 Release，运行只读 Release 快照。
+- [Y] `mcp_call_snaps` 保存 Server、Git、版本、Endpoint、Tool、参数、摘要、长度、时间、延迟、状态、错误、Release 和 `model_api_cost=0`。
+- [Y] Runtime 依据 Release 中的通用激活词、业务说明、声明式提取器、Schema 和白名单选择 Tool；主流程不存在命理专用条件分支。
+- [Y] Streamable HTTP Client 支持 JSON 和 SSE 响应、`Mcp-Session-Id`、initialize、initialized、tools/list 和 tools/call，并限制单响应最大字节数。
+- [Y] 外部 Server 短暂网络失败形成 FAILED MCP Snap，回答降级且不伪造结果；历史失败证据不删除。
+- [N] Router 不成为 MCP 连接、参数或业务规则权威。
+- [N] Release 不保存 Bearer 明文，页面不回显 Secret，Trace 不记录鉴权值。

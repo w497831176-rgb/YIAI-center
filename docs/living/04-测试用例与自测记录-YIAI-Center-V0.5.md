@@ -1,6 +1,6 @@
 # YIAI Center 测试用例与自测记录
 
-> 当前版本：V0.5.8  
+> 当前版本：V0.5.9
 > 文档性质：Living Test Doc（动态测试记忆）  
 > 当前状态：自动自测已完成；产品负责人手动页面体验待执行  
 > 用途：随每个版本维护测试范围、预期、实际结果和证据  
@@ -706,3 +706,82 @@
 - V0.5.0—V0.5.8 后端契约、部署、真实 DeepSeek、Git Skill 导入和 RAG 发布闭环通过。
 - Active Release 为 `V0.5.8-rag-demo`；数据库历史 Run 和会话未重建。
 - RAG 页面视觉、长文本粘贴、预览和按钮点击仍待产品负责人手动体验。
+
+## 17. V0.5.9 远程只读 MCP
+
+### TC-059-01 独立部署与版本固定
+
+- 命语来源：`https://github.com/Brhiza/mingyu`，固定 commit `8e24d474d25d52d8b33533fe6e4dbc50aae6d9c8`， detached HEAD；容器启动不拉取 `main`。
+- 独立目录 `D:\Docker\yiai-mcp-mingyu`、Compose project／容器 `yiai-mcp-mingyu`、端口 `19120`；不属于 YIAI Center Compose。
+- 上游原生为 stdio；独立 Adapter 使用上游 SDK Streamable HTTP Transport，只注册原 Tool 实现，不复制算法。
+- `/health` 返回固定 commit，容器 healthy；YIAI Center 与 `immich_machine_learning` 均未被该部署替换或停止。
+- 状态：通过。
+
+### TC-059-02 initialize、Tool List 与页面字段
+
+- 命语 initialize 返回 `mingyu-mcp-server`／`0.1.0+8e24d47`，Tool List 56 个，测试耗时 32 ms。
+- 官方文档 initialize 返回 `Model Context Protocol`／`1.0.0`，Tool List 3 个；一次成功测试耗时 986 ms。
+- API／页面记录 Git 地址、固定版本、Endpoint、Transport、鉴权、状态、最近测试、Tool Schema／hash／读写属性、白名单、拒绝列表、Agent 和 Release 引用。
+- 外部官方 Endpoint 经主机代理偶发 `URLError`，失败测试保留错误与时间；重试成功后状态回到 CONNECTED，不伪造连通。
+- 状态：通过。
+
+### TC-059-03 只读白名单
+
+- 命语只允许 `ziwei_calculate`；其余 55 个 Tool 均因“不在 Release 只读 Tool 白名单”被拒绝，其中包括 `ziwei_prompt`、八字、六爻、塔罗、择日等。
+- 官方文档只允许 `search_model_context_protocol`；`query_docs_filesystem_model_context_protocol` 虽带只读提示但未入本 Release 白名单，`submit_feedback` 为未验证写 Tool，两者均被拒绝。
+- Runtime 再次按 Release 白名单和固定 Schema 校验，非白名单名称与未知参数无法调用。
+- 状态：通过。
+
+### TC-059-04 命语核心真实 Run
+
+- 输入：`我是女性，阳历1992年8月21日7点35分出生，不使用真太阳时，请给我做紫微斗数排盘。`
+- Release／Run：`rel_8e71df9301be4b7e936941ceda531bb4`／`run_c6a864bd64d04ed3b6d124fd6623dc78`。
+- Router 只选择 `general-service`；唯一 MCP Tool 为 `ziwei_calculate`。
+- 参数为 `gender=female`、`dateType=solar`、`year=1992`、`month=8`、`day=21`、`timeIndex=4`、`useTrueSolarTime=false`、`isLeapMonth=false`、`promptScope=full`。
+- MCP 返回 SUCCESS，结果长度 3,642,960，延迟 3,563 ms，MCP `model_api_cost=0`。
+- 回答展示真实基本资料、命宫、身宫、十二宫、主辅星、四化、大限／流年和完整数据入口，未调用 `ziwei_prompt`。
+- DeepSeek 主回答 Snap：输入未命中 144、缓存命中 4,096、输出 1,313 Token，人民币成本 `0.00287473536`；Run 总成本 `0.00302549184 CNY`。
+- 状态：通过。
+
+### TC-059-05 信息不足集中追问
+
+- 输入：`1992年8月21日7点35分出生，请给我排盘。`
+- Run `run_312f2d79fc564ae4bb8a547e5cf6f38a` 未调用 MCP，只返回一次指定集中追问文案；没有猜性别或历法。
+- 状态：通过。
+
+### TC-059-06 Release A→B 热切换与历史快照
+
+- A Release `rel_8e71df9301be4b7e936941ceda531bb4` 绑定命语；B Release `rel_da9c4e8d8eb540ed89c6738bdc7b9252` 的 Diff 增加官方文档、移除命语并人工发布。
+- 同一会话 `conv_98cad63e288b4cd6abb1c759ee744399` 中，旧 Run `run_c6a864bd64d04ed3b6d124fd6623dc78` 保留命语、旧 Endpoint、commit、Tool 与参数；新 Run `run_fccbf50fe28c4fbba496114ddf4102f9` 固定 B Release 并调用官方文档搜索。
+- B Run 的官方文档 Tool SUCCESS，结果长度 14,790，延迟 1,455 ms，MCP 成本 0；回答依据真实搜索结果。
+- 切换前后应用容器 ID／创建时间均为 `5dacb53d75e15e1f0bc089fc7d0494a8376f3a20198dc26032f9e22aa5088a26`／`2026-07-21T02:11:36.752366345Z`，未重建 YIAI Center。
+- B 发布后 Run `run_be2cd695fba14a959f4121165cacff86` 请求重新调用命语时 MCP Snap 数为 0，证明 A 不再可调用。
+- 状态：通过。
+
+### TC-059-07 Trace、成本与异常降级
+
+- 成功 Trace 顺序覆盖用户消息、信息完整性、Router、Agent、Tool 选择、参数提取、MCP 请求、MCP 响应、客服模型和最终输出。
+- MCP Snap 独立保存 Server、Git、版本、Endpoint、Transport、Tool、参数、结果摘要／长度、起止时间、延迟、状态、错误、Release 和零模型成本。
+- 官方 Endpoint 短暂断连 Run `run_3bcc57cf46834e5b99f27dcfc423a432` 保存 FAILED MCP Snap 和 `URLError`，回答明确降级且未伪造文档结果；后续成功 Run 未覆盖或删除失败证据。
+- 状态：通过。
+
+### TC-059-08 自动化、迁移与部署回归
+
+- 21 条 unittest 全部通过，其中 5 条覆盖 Streamable HTTP/SSE、Session、只读白名单、Schema、声明式参数提取、Release 解绑和历史 MCP Snap。
+- 第五号迁移完成；V0.5.8 数据库副本 `data/yiai-center.sqlite.pre-v059-20260721` 存在，历史 Run／Conversation 保留。
+- `/api/health` 返回 V0.5.9，YIAI Center 与命语 MCP healthy，`immich_machine_learning` 仍 healthy。
+- 状态：通过。
+
+## 18. V0.5.9 待产品负责人手动验证
+
+1. 打开平台管理 → MCP，核对两个 Server 的长 Tool 清单、读写属性、白名单、拒绝列表和 Release 引用。
+2. 打开 Release 页面核对 A／B Diff；打开同一会话的命语旧气泡和官方文档新气泡，比较右侧 Run 抽屉。
+3. 核对 MCP Snap 成本为 0，而 DeepSeek Snap 显示真实 Token、单价快照和人民币成本。
+
+状态：待手动。
+
+## 19. V0.5.9 自测结论
+
+- V0.5.0—V0.5.9 后端契约、数据迁移、独立 MCP 部署、两个远程 Server、只读白名单、真实 Tool 调用、历史快照和无重建热切换已通过。
+- 当前 Active Release 为 `V0.5.9-mcp-docs-hot-swap`；命语 Server 仍保存且 CONNECTED，但已解绑，不会进入新 Run。
+- GitHub 官方 MCP 需要独立最小只读 Token，按授权不阻塞本版本；Fetch MCP 未启用。
