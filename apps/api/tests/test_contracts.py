@@ -1,7 +1,7 @@
 import unittest
 
 from app.deepseek import parse_usage
-from app.runtime import parse_route
+from app.runtime import deterministic_route, parse_route
 
 
 class ContractTests(unittest.TestCase):
@@ -36,6 +36,28 @@ class ContractTests(unittest.TestCase):
                 '{"target_agent":["general-service","complaint-service"],'
                 '"confidence":0.8,"reason":"bad"}'
             )
+
+    def test_router_accepts_agent_from_current_release(self):
+        route = parse_route(
+            '{"target_agent":"agent_custom","confidence":0.9,"reason":"match"}',
+            {"agent_custom"},
+        )
+        self.assertEqual(route["target_agent"], "agent_custom")
+        with self.assertRaises(ValueError):
+            parse_route(
+                '{"target_agent":"agent_old","confidence":0.9,"reason":"bad"}',
+                {"agent_custom"},
+            )
+
+    def test_deterministic_router_uses_dynamic_agent_description(self):
+        route = deterministic_route(
+            "请帮我安排旅游行程",
+            [
+                {"id": "general", "name": "通用客服", "description": "回答常规咨询"},
+                {"id": "travel", "name": "旅游行程", "description": "安排旅游和行程"},
+            ],
+        )
+        self.assertEqual(route["target_agent"], "travel")
 
 
 if __name__ == "__main__":

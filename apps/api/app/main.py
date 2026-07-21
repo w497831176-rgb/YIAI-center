@@ -176,6 +176,12 @@ class YIAIHandler(BaseHTTPRequestHandler):
             self._chat_stream()
             return
         try:
+            if path == "/api/agents":
+                try:
+                    self._send_json(db.create_agent_config(self._read_json()), 201)
+                except ValueError as exc:
+                    self._send_json({"detail": str(exc) or "Invalid Agent config"}, 400)
+                return
             if path == "/api/skills":
                 self._send_json(db.save_skill(self._read_json()), 201)
                 return
@@ -335,6 +341,22 @@ class YIAIHandler(BaseHTTPRequestHandler):
             self._send_json({"detail": "Invalid request"}, 400)
         except Exception as exc:
             print(f"POST {path} failed: {type(exc).__name__}", flush=True)
+            self._send_json({"detail": "Internal error"}, 500)
+
+    def do_DELETE(self) -> None:
+        path = urlparse(self.path).path
+        agent_match = re.fullmatch(r"/api/agents/([^/]+)", path)
+        if not agent_match:
+            self._send_json({"detail": "Not found"}, 404)
+            return
+        try:
+            self._send_json(db.delete_agent_config(agent_match.group(1)))
+        except KeyError:
+            self._send_json({"detail": "Agent not found"}, 404)
+        except ValueError as exc:
+            self._send_json({"detail": str(exc)}, 409)
+        except Exception as exc:
+            print(f"DELETE {path} failed: {type(exc).__name__}", flush=True)
             self._send_json({"detail": "Internal error"}, 500)
 
     def do_PUT(self) -> None:

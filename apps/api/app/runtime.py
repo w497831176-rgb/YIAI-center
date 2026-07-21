@@ -9,24 +9,32 @@ from . import db, mcp_runtime, rag
 from .deepseek import DeepSeekAdapter
 
 
-ALLOWED_AGENTS = {
-    "general-service",
-    "complaint-service",
-    "work-order-service",
-}
-
-
-def deterministic_route(text: str) -> dict[str, Any]:
+def _route_terms(text: str) -> set[str]:
     lowered = text.lower()
-    if any(word in lowered for word in ("工单", "报修", "进度", "关闭", "创建单")):
-        agent = "work-order-service"
-        reason = "请求包含工单或事项处理意图"
-    elif any(word in lowered for word in ("投诉", "不满", "差评", "生气", "太差", "骗人")):
-        agent = "complaint-service"
-        reason = "请求包含明确不满或投诉意图"
-    else:
-        agent = "general-service"
-        reason = "请求属于一般咨询或尚无明确专项意图"
+    terms = set(re.findall(r"[a-z0-9_-]{2,}", lowered))
+    for block in re.findall(r"[\u4e00-\u9fff]+", lowered):
+        terms.update(block[index : index + 2] for index in range(max(0, len(block) - 1)))
+    return terms
+
+
+def deterministic_route(text: str, agents: list[dict[str, Any]]) -> dict[str, Any]:
+    if not agents:
+        raise ValueError("Release does not contain an Agent")
+    input_terms = _route_terms(text)
+    ranked = []
+    for index, item in enumerate(agents):
+        profile = " ".join(
+            str(item.get(key, "")) for key in ("name", "description", "system_prompt")
+        )
+        score = len(input_terms & _route_terms(profile))
+        ranked.append((score, -index, item))
+    score, _index, selected = max(ranked, key=lambda item: (item[0], item[1]))
+    agent = str(selected["id"])
+    reason = (
+        f"用户请求与该 Agent 的名称和业务说明匹配（得分 {score}）"
+        if score
+        else "模型 Router 不可用，按当前 Release 中的 Agent 顺序安全兜底"
+    )
     return {
         "target_agent": agent,
         "confidence": 0.72,
@@ -36,13 +44,17 @@ def deterministic_route(text: str) -> dict[str, Any]:
     }
 
 
-def parse_route(content: str) -> dict[str, Any]:
+def parse_route(
+    content: str, allowed_agent_ids: set[str] | None = None
+) -> dict[str, Any]:
     match = re.search(r"\{.*\}", content, re.DOTALL)
     if not match:
         raise ValueError("Router did not return a JSON object")
     result = json.loads(match.group(0))
     target = result.get("target_agent")
-    if not isinstance(target, str) or target not in ALLOWED_AGENTS:
+    if not isinstance(target, str) or (
+        allowed_agent_ids is not None and target not in allowed_agent_ids
+    ):
         raise ValueError("Router must select exactly one allowed Agent")
     confidence = float(result.get("confidence", 0))
     return {
@@ -194,14 +206,28 @@ def execute_chat(
                     "mcp_input_completeness_failed",
                     {"error": type(exc).__name__, "fallback_error": type(fallback_exc).__name__},
                 )
+    released_agents = run["release_config"].get("agents") or []
+    allowed_agent_ids = {
+        str(item.get("id")) for item in released_agents if item.get("id")
+    }
+    if not allowed_agent_ids:
+        raise ValueError("Active Release does not contain an Agent")
+    agent_catalog = [
+        {
+            "id": item["id"],
+            "name": item.get("name", item["id"]),
+            "description": item.get("description", ""),
+        }
+        for item in released_agents
+    ]
     router_prompt = [
         {
             "role": "system",
             "content": (
-                "你是唯一 Router。只能从 general-service、complaint-service、"
-                "work-order-service 中选择一个。普通咨询选 general-service；"
-                "明确不满或投诉选 complaint-service；工单、报修、创建、更新、"
-                "关闭、查询进度选 work-order-service。只输出一个 JSON 对象："
+                "你是唯一 Router。只能从当前 Release 提供的 Agent 清单中"
+                "选择一个，根据名称和业务说明匹配用户意图。\n"
+                f"Agent 清单：{json.dumps(agent_catalog, ensure_ascii=False)}\n"
+                "只输出一个 JSON 对象："
                 '{"target_agent":"...","confidence":0到1,"reason":"...",'
                 '"needs_clarification":false}。禁止数组和多个 Agent。'
             ),
@@ -223,9 +249,9 @@ def execute_chat(
                 "usage_status": router_snap["usage_status"],
             },
         )
-        route = parse_route(router_content)
+        route = parse_route(router_content, allowed_agent_ids)
     except Exception as exc:
-        route = deterministic_route(content)
+        route = deterministic_route(content, released_agents)
         route["fallback_reason"] = type(exc).__name__
         trace(
             run,

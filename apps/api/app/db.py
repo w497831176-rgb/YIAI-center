@@ -784,7 +784,11 @@ def _agent_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _agent_validation_errors(
-    conn: sqlite3.Connection, agent_id: str, values: dict[str, Any]
+    conn: sqlite3.Connection,
+    agent_id: str,
+    values: dict[str, Any],
+    *,
+    require_existing: bool = True,
 ) -> list[str]:
     errors: list[str] = []
     if not values["name"] or len(values["name"]) > 80:
@@ -793,7 +797,9 @@ def _agent_validation_errors(
         errors.append("description 必须为 1-500 个字符")
     if not values["system_prompt"] or len(values["system_prompt"]) > 20_000:
         errors.append("system_prompt 必须为 1-20000 个字符")
-    if conn.execute("SELECT 1 FROM agent_configs WHERE id=?", (agent_id,)).fetchone() is None:
+    if require_existing and conn.execute(
+        "SELECT 1 FROM agent_configs WHERE id=?", (agent_id,)
+    ).fetchone() is None:
         errors.append("未知垂直 Agent")
     for skill_id in values["skill_ids"]:
         row = conn.execute("SELECT status FROM skills WHERE id=?", (skill_id,)).fetchone()
@@ -853,6 +859,59 @@ def save_agent_config(agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
             ),
         )
     return get_agent_config(agent_id)
+
+
+def create_agent_config(payload: dict[str, Any]) -> dict[str, Any]:
+    values = _agent_payload(payload)
+    agent_id = new_id("agent")
+    with connection() as conn:
+        errors = _agent_validation_errors(
+            conn, agent_id, values, require_existing=False
+        )
+        if errors:
+            raise ValueError("；".join(errors))
+        conn.execute(
+            """
+            INSERT INTO agent_configs(
+                id, name, description, system_prompt, skill_ids_json,
+                rag_document_ids_json, mcp_tool_bindings_json, tool_ids_json,
+                validation_errors_json, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, '[]', ?)
+            """,
+            (
+                agent_id,
+                values["name"],
+                values["description"],
+                values["system_prompt"],
+                json.dumps(values["skill_ids"], ensure_ascii=False),
+                json.dumps(values["rag_document_ids"], ensure_ascii=False),
+                json.dumps(values["mcp_tool_bindings"], ensure_ascii=False),
+                json.dumps(values["tool_ids"], ensure_ascii=False),
+                now_iso(),
+            ),
+        )
+    return get_agent_config(agent_id)
+
+
+def delete_agent_config(agent_id: str) -> dict[str, Any]:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT id, name FROM agent_configs WHERE id=?", (agent_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(agent_id)
+        count = conn.execute("SELECT COUNT(*) AS count FROM agent_configs").fetchone()[
+            "count"
+        ]
+        if count <= 1:
+            raise ValueError("至少保留一个垂直 Agent")
+        conn.execute("DELETE FROM agent_configs WHERE id=?", (agent_id,))
+    return {
+        "id": agent_id,
+        "name": row["name"],
+        "deleted": True,
+        "active_release_unchanged": True,
+    }
 
 
 def _skill_validation_errors(payload: dict[str, Any]) -> list[str]:

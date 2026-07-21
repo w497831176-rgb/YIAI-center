@@ -168,9 +168,52 @@ class AgentConfigTests(unittest.TestCase):
         source_path = next(path for path in candidates if path.exists())
         source = source_path.read_text(encoding="utf-8")
         self.assertIn('id="agent-form"', source)
+        self.assertIn('class="management-grid"', source)
+        self.assertIn('data-action="new-agent"', source)
+        self.assertIn('data-agent-action="edit"', source)
         self.assertIn('name="mcp_tool_bindings"', source)
         self.assertNotIn('name="agent_ids"', source)
         self.assertNotIn('getAll("agent_ids")', source)
+
+    def test_agent_can_be_created_released_and_deleted_without_rewriting_active(self):
+        active_before = db.get_workspace()["active_release_id"]
+        created = db.create_agent_config(
+            {
+                "name": "新增业务 Agent",
+                "description": "处理一个可从 Release 动态发布的新业务场景。",
+                "system_prompt": "你是新增业务 Agent，只根据已发布的能力回答。",
+                "skill_ids": [],
+                "rag_document_ids": [],
+                "mcp_tool_bindings": [],
+                "tool_ids": [],
+            }
+        )
+        self.assertTrue(created["id"].startswith("agent_"))
+        self.assertEqual(db.get_workspace()["active_release_id"], active_before)
+
+        candidate = db.create_candidate(
+            "V0.5.9-dynamic-agent", "验证新 Agent 进入候选 Release"
+        )
+        released_ids = {
+            item["id"] for item in db.get_release_detail(candidate["id"])["config"]["agents"]
+        }
+        self.assertIn(created["id"], released_ids)
+
+        result = db.delete_agent_config(created["id"])
+        self.assertTrue(result["deleted"])
+        self.assertTrue(result["active_release_unchanged"])
+        self.assertEqual(db.get_workspace()["active_release_id"], active_before)
+        with self.assertRaises(KeyError):
+            db.get_agent_config(created["id"])
+
+    def test_last_agent_draft_cannot_be_deleted(self):
+        with db.connection() as conn:
+            conn.execute(
+                "DELETE FROM agent_configs WHERE id IN (?, ?)",
+                ("complaint-service", "work-order-service"),
+            )
+        with self.assertRaises(ValueError):
+            db.delete_agent_config("general-service")
 
 
 if __name__ == "__main__":

@@ -168,7 +168,7 @@
 
 预期：Router 每次仍只选择一个 Agent，Skill、RAG、MCP 只使用该 Agent 在固定 Release 中的绑定。
 
-实际：26 项自动测试中的 Runtime 契约通过。真实 Run `run_62c532ccda3f41a89bef2ebdb57c48b7` 固定新 Release 并只选择 `general-service`；随后现有容器代理 `http://host.docker.internal:7890` 中止 DeepSeek TLS 连接，Router 使用确定性降级，主回答调用进入 ERROR。系统保留错误 Trace，没有伪造回答或成本。
+实际：30 项自动测试中的 Runtime 契约通过。真实 Run `run_62c532ccda3f41a89bef2ebdb57c48b7` 固定新 Release 并只选择 `general-service`；随后现有容器代理 `http://host.docker.internal:7890` 中止 DeepSeek TLS 连接，Router 使用确定性降级，主回答调用进入 ERROR。系统保留错误 Trace，没有伪造回答或成本。
 
 状态：阻塞。阻塞点是电脑从网线切换 Wi-Fi 后现有 Clash 代理链路，宿主机直连 `https://api.deepseek.com` 可达，但容器通过原代理或直接 TLS 均被中止；不属于本次 Agent 配置代码回归。
 
@@ -184,7 +184,7 @@
 
 预期：V0.5.9 原有 Skill、RAG、MCP、Release、Run、Usage 测试继续通过。
 
-实际：生产镜像内执行 `python -m unittest discover -s tests -v`，共 26 项，全部通过，耗时 3.773 秒。
+实际：完整源码映射环境内执行 `python -m unittest discover -s tests -v`，共 30 项，全部通过，耗时 4.103 秒。新增覆盖 Agent 创建、删除、Release 快照、动态 Router 和卡片界面契约。
 
 状态：通过。
 
@@ -202,13 +202,30 @@
 
 预期：产品负责人能够从 Agent 页面完成四类能力选择，信息层级清楚，没有资源页反向勾选 Agent 的入口。
 
-自动证据：页面脚本已执行，Agent 表单和四类装配区域已部署，资源页反向绑定输入不存在。
+自动证据：页面脚本已执行，Agent 卡片、新增按钮、配置弹层和四类装配区域已部署，资源页反向绑定输入不存在。
 
 状态：待产品负责人手动验证页面布局、文案和操作感受。
+
+### TC-059-G02 平台管理卡片化
+
+预期：Agent、Release、Skill、RAG、MCP 和 Run 首页都以卡片为主；新增或导入放在右上角；编辑、校验、测试、停用、发布和查看 Trace 从对应卡片进入。
+
+实际：上述六个页面均已改为自适应卡片网格，大表单改为点击后打开的独立弹层。Headless Edge 真实加载部署地址 5 秒后完成首屏渲染，DOM 中存在 `app-shell` 和 `chat-form`。
+
+状态：自动证据通过，卡片密度和操作感受待产品负责人手动验收。
+
+### TC-059-G03 新增垂直 Agent 闭环
+
+预期：右上角可新增 Agent；系统自动生成稳定 ID；新 Agent 可进入候选 Release 并被 Router 从当前 Release 清单动态选择；删除草稿不改写 Active Release 和历史 Run。
+
+实际：部署环境中临时创建 `agent_65e4d80942894573b39852e2d7fdbc4e`，Agent 数量从 3 变为 4；紧接着删除草稿，数量恢复为 3，接口明确返回 `active_release_unchanged=true`。自动测试另验证新 Agent 进入候选 Release，以及 Router 接受新 Agent ID。
+
+状态：通过。
 
 ## 9. 自测结论
 
 - Agent 配置归属错误已经修复并部署。
 - 数据迁移、API、Candidate、Diff、历史快照、Tool 级绑定和回归测试通过。
-- 页面视觉与操作体验留给产品负责人手动验证。
+- 平台管理已全面改为“卡片总览 + 右上角新增 + 卡片操作 + 弹层编辑”；具体视觉密度留给产品负责人手动验收。
+- 垂直 Agent 已支持真实新增、编辑、删除草稿、候选 Release 快照和动态 Router。
 - 真实 DeepSeek 新 Run 因 Wi-Fi 切换后的外部代理链路阻塞，已保留失败 Run 与 Trace，未把它误记为通过。
