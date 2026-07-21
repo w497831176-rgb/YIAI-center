@@ -1,6 +1,6 @@
 # YIAI Center 实际实现说明
 
-> 当前版本：V0.5.7  
+> 当前版本：V0.5.8  
 > 文档性质：Living Implementation Doc（动态实现记忆）  
 > 用途：对照产品、架构和版本规划，说明代码事实上怎样运行、为什么这样实现、当前没做什么  
 > 当前部署：已部署并通过后端自测  
@@ -16,7 +16,7 @@
 
 ## 1. 当前交付结论
 
-V0.5.0—V0.5.7 已形成一个可以真实演示的最小闭环：
+V0.5.0—V0.5.8 已形成一个可以真实演示的最小闭环：
 
 1. 打开一个无登录、无行业迹象的三 TAB 页面。
 2. 用户发送一条消息。
@@ -34,6 +34,9 @@ V0.5.0—V0.5.7 已形成一个可以真实演示的最小闭环：
 14. 平台创建和编辑自然语言 Skill，每次保存形成不可变 SkillVersion。
 15. 只有已校验、已绑定且随 Candidate 人工发布的 SkillVersion 才进入新 Run Prompt；历史 Run 保留旧 Release 快照。
 16. 公开 GitHub URL 可以固定到具体 commit，在临时隔离目录扫描后把纯文本 `SKILL.md` 导入为未绑定 Draft；脚本和可执行内容整次拒绝并留存原因。
+17. 页面可粘贴纯文本或 Markdown，预览确定性切片并保存不可变 RAGVersion。
+18. 每个文档同时建立 SQLite FTS5/BM25 索引与本地 TF-IDF/LSA 潜语义向量，再用固定 RRF 融合。
+19. 只有校验、绑定并随 Release 发布的 RAGVersion 才进入新 Run；Trace 保留实际 Chunk、分数、引用、注入长度和 Release 快照。
 
 当前访问地址：
 
@@ -42,7 +45,7 @@ V0.5.0—V0.5.7 已形成一个可以真实演示的最小闭环：
 当前 GitHub：
 
 - `https://github.com/w497831176-rgb/YIAI-center`。
-- 核心实现提交：`e47ca3f`；Living Docs 在后续提交持续同步。
+- V0.5.8 核心实现提交：`ca7b0f0`；Living Docs 在后续提交持续同步。
 
 ## 2. 产品规划如何落地
 
@@ -552,8 +555,8 @@ Run 与 Trace：
 - 首页：HTTP 200。
 - SQLite：存在并在容器重建后保留 Run。
 - `immich_machine_learning`：running。
-- 数据库迁移版本：3；V0.5.7 部署前副本为 `data/yiai-center.sqlite.pre-v057-20260721`。
-- Active Release：`V0.5.6-skill-demo`。
+- 数据库迁移版本：4；V0.5.8 部署前副本为 `data/yiai-center.sqlite.pre-v058-20260721`。
+- Active Release：`V0.5.8-rag-demo`。
 
 ## 11. 与产品和架构 Y/N 的对照结论
 
@@ -586,7 +589,6 @@ Run 与 Trace：
 以下功能仍是产品全局中的后续规划，不是 V0.5.5 已完成功能：
 
 - Agent 配置编辑页面。
-- 文本 RAG 和三篇通用长文档。
 - 远程只读 MCP。
 - 工单真实读写 Tool。
 - 写操作确认和幂等回执。
@@ -640,12 +642,21 @@ Trace 证明：
 - 拒绝 Attempt：`skillimport_486b00b9068b40b9b2849e4ca512d5a8`；同一 commit；因 `scripts/check.py` 被拒绝。
 - 外部读取使用公开 GitHub，不传 Git Token；服务日志、Trace 和数据库均不含凭据和临时目录。
 
-## 16. 下一版本如何继续
+## 16. V0.5.8 代表证据
 
-开始 V0.5.8 前：
+- 文档／RAGVersion／切片数：通用服务规则 `ragdoc_422f45678445497380c7a2f36b5a6627`／`ragv_6e3b858476204dd1ae8b8a5ba1718194`／5；通用工单规则 `ragdoc_49f2582565aa4ad8ac80a57f3b5e5c19`／`ragv_2365960446c54cf2923d5653093781c5`／5；通用问题处理方法 `ragdoc_c328baf5d8634d6aa490b375debcbad7`／`ragv_5c82303e5cef49f480a74026e647a411`／6。
+- 实际技术：`markdown-paragraph-v1`、SQLite FTS5／BM25、`local-tfidf-lsa-v1`、`weighted-rrf`。LSA 从当前语料 TF-IDF 矩阵求潜语义坐标，不执行下载、不使用哈希或随机向量，也不冒充 BGE。
+- Candidate／Active：`rel_829f57da467c4cc59d4693cd3acbcfcf`／`V0.5.8-rag-demo`。
+- 发布前 Run：`run_10cacdd225e644f78fe9e225879f9b00`，0 个 RAG 绑定、0 条证据。
+- 同会话发布后 Run：`run_1a2a5d2a4b5f4e81b8d776c939f3565b`，Router 只选一般客服，召回 4 个真实切片、实际使用 2 个合法引用、注入 1408 字符；主 Agent 输入未命中 1237、命中 0、输出 325 Token；Run 总成本 `0.002268 CNY`。
+- RAG 检索步骤没有云模型调用并明确记录成本 0；两次 DeepSeek 调用的 Token、单价快照和人民币成本仍分别保存在 CloudCallSnap。
+
+## 17. 下一版本如何继续
+
+开始 V0.5.9 前：
 
 1. 产品负责人先完成 04 文档的三条手动体验。
 2. 修复任何阻塞 V0.5.5 演示的问题。
 3. 重新阅读 01—05。
-4. 在 03 中填写 V0.5.8 开工卡。
-5. 先验证目标主机可用的真实本地 Embedding，再实现 FTS5、向量和混合检索。
+4. 以产品负责人的 V0.5.9 补充授权覆盖旧路线图中的单一 MCP 范围。
+5. 先独立部署并固定命语紫微斗数 MCP commit，再实现平台通用远程 MCP Client、只读白名单、Release 绑定、真实 Run Trace 与热拔插。

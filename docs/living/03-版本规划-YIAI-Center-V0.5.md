@@ -1,6 +1,6 @@
 # YIAI Center 小步迭代版本规划
 
-> 当前版本：V0.5.7  
+> 当前版本：V0.5.8  
 > 文档视角：产品交付与开发拆解  
 > 文档性质：Living Roadmap（动态路线图），不是固定排期承诺  
 > 用途：把产品全局 Y/N 和架构全局 Y/N 拆成小功能、小版本和真实验收  
@@ -466,7 +466,19 @@
 - AI 回答引用真实 Chunk。
 - 无命中时不生成假引用。
 
-当前状态：待开始。
+当前状态：已完成（2026-07-21）。
+
+真实证据：
+
+- 第四号前向迁移建立 RAG 文档、不可变版本、切片和 FTS5 索引；迁移前副本为 `data/yiai-center.sqlite.pre-v058-20260721`。
+- Gate 0 选定并如实展示 `sqlite-fts5-bm25`、`local-tfidf-lsa-v1` 与 `weighted-rrf`；16 条 unittest 全部通过。
+- 三篇长文档分别生成 5、5、6 个切片，均为领域无关内容并绑定不同垂直 Agent。
+- Candidate／Active Release：`rel_829f57da467c4cc59d4693cd3acbcfcf`／`V0.5.8-rag-demo`，Diff 新增 3 个 RAGVersion。
+- 发布前 Run `run_10cacdd225e644f78fe9e225879f9b00` 固定旧 Release、0 个 RAG 绑定和 0 条证据。
+- 同一会话发布后 Run `run_1a2a5d2a4b5f4e81b8d776c939f3565b` 固定 V0.5.8，召回 4 个真实切片，回答实际使用 2 个合法 Citation；RAG 步骤成本为 0，模型步骤记录真实 Token 与人民币成本。
+- 词表外查询 `zzqv987654321` 的关键词、向量和混合结果均为 0，没有 Citation。
+
+未完成：浏览器视觉与表单点击体验由产品负责人手动验证。
 
 ## 13. V0.5.9——远程只读 MCP
 

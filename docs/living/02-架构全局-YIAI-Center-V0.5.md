@@ -1,7 +1,7 @@
 # YIAI Center 架构全局 Y/N
 
-> 当前版本：V0.5.7  
-> 最近复核：2026-07-21，已启用第三号前向迁移与隔离 Git Skill 导入记录  
+> 当前版本：V0.5.8  
+> 最近复核：2026-07-21，已启用第四号前向迁移与真实 BM25／本地 LSA／RRF 检索  
 > 文档视角：系统架构与后端工程  
 > 文档性质：Living Doc（动态工作记忆），不是不可变技术规范  
 > 用途：回答“技术上必须怎样实现、哪些权威只能有一个、哪些实现绝对禁止”  
@@ -40,7 +40,7 @@
 - [Y] V0.5 后端使用 Python 3.12 标准库 HTTP Server、SQLite 和 urllib，保持零第三方运行依赖。
 - [N] 当前不引入 FastAPI、Pydantic 和 httpx；目标机外部 Python 包下载被代理中断，演示闭环不应被框架依赖阻塞。
 - [Y] 对话和运行事件使用 SSE。
-- [Y] 数据使用 SQLite WAL 和可重复执行的轻量前向迁移；V0.5.6 已从初始化迁移进入第二号迁移。
+- [Y] 数据使用 SQLite WAL 和可重复执行的轻量前向迁移；V0.5.8 已按顺序执行到第四号迁移，不删除或重建历史数据。
 - [N] 当前演示版本不引入 Alembic；迁移由单一数据库模块按版本顺序执行，不删除或重建 SQLite。
 - [Y] Embedding 默认本地运行。
 - [Y] DeepSeek API 作为云模型 Provider。
@@ -238,9 +238,9 @@ user_facing_reason
 - [Y] 切分模式使用 Markdown 标题、段落和规则项的确定性切分。
 - [Y] 每个 RagVersion 固定原文 hash、切分器版本、Chunk 和索引版本。
 - [Y] 关键词检索使用 SQLite FTS5／BM25。
-- [Y] 向量检索使用本地中文或多语言 Embedding。
-- [Y] V0.5 默认候选模型为 `BAAI/bge-small-zh-v1.5`，最终由 Gate 0 资源测试确认。
-- [Y] 混合检索使用固定融合算法和版本。
+- [Y] 向量检索使用目标容器内真实本地向量模型，不以关键词分数、哈希或随机数冒充向量。
+- [Y] V0.5.8 Gate 0 最终选择 `local-tfidf-lsa-v1`：用语料 TF-IDF 矩阵的截断潜语义空间生成查询和文档向量；目标机不需要下载模型，实际余弦排序已通过测试。该名称和能力如实展示，不冒充 BGE 或神经网络 Embedding。
+- [Y] 混合检索使用固定 `weighted-rrf`（k=60，关键词／向量各 0.5）融合算法和版本。
 - [Y] UI 返回实际 chunker、keyword engine、embedding model 和 fusion mode。
 - [Y] 检索结果记录 document_version_id、chunk_id、score、引用文本和算法版本。
 - [Y] 上线初始化 3 篇领域无关长文档。

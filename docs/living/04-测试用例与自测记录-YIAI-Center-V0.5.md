@@ -1,6 +1,6 @@
 # YIAI Center 测试用例与自测记录
 
-> 当前版本：V0.5.7  
+> 当前版本：V0.5.8  
 > 文档性质：Living Test Doc（动态测试记忆）  
 > 当前状态：自动自测已完成；产品负责人手动页面体验待执行  
 > 用途：随每个版本维护测试范围、预期、实际结果和证据  
@@ -31,7 +31,7 @@
 - 数据文件：`D:\docker\yiai-center\data\yiai-center.sqlite`。
 - 模型：`deepseek-v4-flash`。
 - 模型模式：thinking enabled，reasoning effort high。
-- GitHub 核心实现提交：`e47ca3f`；Living Docs 在后续提交持续同步。
+- GitHub V0.5.8 核心实现提交：`ca7b0f0`；Living Docs 在后续提交持续同步。
 
 ## 2. 状态定义
 
@@ -665,3 +665,44 @@
 - 当前容器 healthy，Active Release 为 `V0.5.6-skill-demo`。
 - 可以交给产品负责人进行浏览器手动体验。
 - 手动体验通过前，不把 UI 视觉和交互标记为最终验收完成。
+
+## 15. V0.5.8 RAG 混合检索
+
+### TC-058-01 确定性切片与技术披露
+
+- 三篇领域无关 Markdown 长文档分别生成 5、5、6 个切片；相同输入重复预览结果一致。
+- 页面和 API 如实返回 `markdown-paragraph-v1`、`sqlite-fts5-bm25`、`local-tfidf-lsa-v1`、`weighted-rrf`。
+- 状态：通过。
+
+### TC-058-02 关键词、向量与混合排序
+
+- 查询“登录失败后怎样重置密码并完成身份核验？”时，BM25 首条分数 `12.252185315657858`，LSA 首条余弦分数 `0.9745432893590202`，RRF 首条分数 `0.01639344262295082`，三路均命中身份与信息最小化切片。
+- 16 条标准库 unittest 全部通过，其中 4 条覆盖 RAG 切片、排序、无召回和 Release 边界。
+- 状态：通过。
+
+### TC-058-03 无召回与引用保护
+
+- 词表外查询 `zzqv987654321` 的 BM25、向量、混合结果均为 0。
+- Runtime 对模型输出中的 Citation 做白名单校验，未知 Citation 在发送给用户前移除。
+- 状态：通过。
+
+### TC-058-04 Release 发布与历史快照
+
+- Candidate／Active：`rel_829f57da467c4cc59d4693cd3acbcfcf`／`V0.5.8-rag-demo`，Diff 新增 3 个 RAGVersion。
+- 发布前同会话 Run：`run_10cacdd225e644f78fe9e225879f9b00`，Release `V0.5.6-skill-demo`，0 条证据。
+- 发布后 Run：`run_1a2a5d2a4b5f4e81b8d776c939f3565b`，召回 4 条真实 Chunk，实际使用 2 个合法 Citation，注入 1408 字符。
+- 历史 Run 仍显示旧 Release 和 0 个绑定；新 Run 显示新 Release、RAGVersion、Chunk、分数、正文 hash 与 Citation。
+- 状态：通过。
+
+### TC-058-05 Trace、成本与部署
+
+- 发布后 Trace 包含 `rag_retrieval_requested`、`rag_retrieval_completed`、`rag_citation_validation`，并保留三路算法、Chunk ID、分数、引用和 Release 快照。
+- RAG 本地步骤明确记录 `model_api_cost=0`；Router／主 Agent 两个 CloudCallSnap 分别记录真实用量，Run 总成本 `0.002268 CNY`。
+- Health 为 V0.5.8，迁移版本 4，应用与 `immich_machine_learning` 均 healthy；部署前一致性副本存在。
+- 状态：通过。
+
+## 16. V0.5.8 自测结论
+
+- V0.5.0—V0.5.8 后端契约、部署、真实 DeepSeek、Git Skill 导入和 RAG 发布闭环通过。
+- Active Release 为 `V0.5.8-rag-demo`；数据库历史 Run 和会话未重建。
+- RAG 页面视觉、长文本粘贴、预览和按钮点击仍待产品负责人手动体验。
