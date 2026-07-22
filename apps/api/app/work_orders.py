@@ -297,9 +297,16 @@ def plan_read(content: str, allowed_tool_ids: set[str]) -> dict[str, Any] | None
 def _label_value(content: str, labels: tuple[str, ...]) -> str:
     label_group = "|".join(re.escape(label) for label in labels)
     match = re.search(
-        rf"(?:{label_group})\s*[:：=]\s*([^；;\n]+)", content, re.IGNORECASE
+        rf"(?:\*\*)?(?:{label_group})(?:\*\*)?"
+        rf"(?:（[^）\n]{{0,30}}）|\([^\)\n]{{0,30}}\))?"
+        rf"\s*[:：=]\s*([^；;\n]+)",
+        content,
+        re.IGNORECASE,
     )
-    return match.group(1).strip() if match else ""
+    if not match:
+        return ""
+    value = match.group(1).strip()
+    return re.sub(r"[\s\*\"”]+$", "", value).strip()
 
 
 def _priority(value: str) -> str:
@@ -317,6 +324,109 @@ def _priority(value: str) -> str:
     return mapping.get(value.strip().upper(), mapping.get(value.strip(), ""))
 
 
+def extract_write_payload(tool_id: str, content: str) -> dict[str, Any]:
+    if tool_id == "create_work_order":
+        return {
+            "subject": _label_value(content, ("subject", "主题", "标题", "工单标题")),
+            "description": _label_value(
+                content, ("description", "描述", "问题描述", "详细描述")
+            ),
+            "category": _label_value(content, ("category", "类别", "分类", "工单类别")),
+            "priority": _priority(
+                _label_value(content, ("priority", "优先级", "紧急程度"))
+            ),
+        }
+    work_order_id = _work_order_id(content) or ""
+    if tool_id == "update_work_order":
+        changes: dict[str, Any] = {}
+        for field, labels in (
+            ("subject", ("subject", "主题", "标题", "工单标题")),
+            ("description", ("description", "描述", "补充信息", "详细描述")),
+            ("category", ("category", "类别", "分类", "工单类别")),
+            ("result", ("result", "处理结果", "结果")),
+        ):
+            value = _label_value(content, labels)
+            if value:
+                changes[field] = value
+        priority = _priority(_label_value(content, ("priority", "优先级", "紧急程度")))
+        if priority:
+            changes["priority"] = priority
+        return {"work_order_id": work_order_id, "changes": changes}
+    if tool_id == "close_work_order":
+        return {
+            "work_order_id": work_order_id,
+            "result": _label_value(content, ("result", "处理结果", "结果", "说明")),
+        }
+    if tool_id == "delete_work_order":
+        return {"work_order_id": work_order_id}
+    return {}
+
+
+def missing_write_fields(tool_id: str, payload: dict[str, Any]) -> list[str]:
+    if tool_id == "create_work_order":
+        return [
+            field
+            for field in ("subject", "description", "category", "priority")
+            if not payload.get(field)
+        ]
+    missing = []
+    if not payload.get("work_order_id"):
+        missing.append("work_order_id")
+    if tool_id == "update_work_order" and not payload.get("changes"):
+        missing.append("changes")
+    if tool_id == "close_work_order" and not payload.get("result"):
+        missing.append("result")
+    return missing
+
+
+def merge_write_payload(
+    tool_id: str, existing: dict[str, Any], content: str
+) -> dict[str, Any]:
+    incoming = extract_write_payload(tool_id, content)
+    merged = json.loads(json.dumps(existing, ensure_ascii=False))
+    if tool_id == "update_work_order":
+        if incoming.get("work_order_id"):
+            merged["work_order_id"] = incoming["work_order_id"]
+        changes = dict(merged.get("changes") or {})
+        changes.update(incoming.get("changes") or {})
+        merged["changes"] = changes
+        return merged
+    for key, value in incoming.items():
+        if value:
+            merged[key] = value
+    return merged
+
+
+def is_confirmation_message(content: str) -> bool:
+    normalized = re.sub(r"[\s，。！？!,.]", "", content).lower()
+    return normalized in {
+        "确认",
+        "正确",
+        "没问题",
+        "确认创建",
+        "确认提交",
+        "同意",
+        "yes",
+        "ok",
+    }
+
+
+def is_cancel_message(content: str) -> bool:
+    normalized = re.sub(r"[\s，。！？!,.]", "", content)
+    return normalized in {"取消", "不创建了", "不用了", "放弃", "取消操作"}
+
+
+def contains_unverified_write_success(answer: str) -> bool:
+    patterns = (
+        r"工单(?:已经|已)?创建成功",
+        r"(?:已经|已)成功创建(?:了)?工单",
+        r"系统(?:已)?返回工单编号",
+        r"工单编号(?:为|是)\s*[A-Z]{1,6}[-\d]",
+        r"(?:已经|已)成功(?:更新|关闭|删除)(?:了)?工单",
+    )
+    return any(re.search(pattern, answer, re.IGNORECASE) for pattern in patterns)
+
+
 def plan_write(content: str, allowed_tool_ids: set[str]) -> dict[str, Any] | None:
     work_order_id = _work_order_id(content)
     def negated(verb: str) -> bool:
@@ -328,48 +438,25 @@ def plan_write(content: str, allowed_tool_ids: set[str]) -> dict[str, Any] | Non
         )
 
     if "创建" in content and "工单" in content and not negated("创建") and "create_work_order" in allowed_tool_ids:
-        payload = {
-            "subject": _label_value(content, ("主题", "标题")),
-            "description": _label_value(content, ("描述", "问题")),
-            "category": _label_value(content, ("类别", "分类")),
-            "priority": _priority(_label_value(content, ("优先级",))),
-        }
-        missing = [key for key, value in payload.items() if not value]
+        payload = extract_write_payload("create_work_order", content)
+        missing = missing_write_fields("create_work_order", payload)
         return {"tool_id": "create_work_order", "payload": payload, "missing_fields": missing}
     if "更新" in content and "工单" in content and not negated("更新") and "update_work_order" in allowed_tool_ids:
-        changes: dict[str, Any] = {}
-        for field, labels in (
-            ("subject", ("主题", "标题")),
-            ("description", ("描述", "补充信息")),
-            ("category", ("类别", "分类")),
-            ("result", ("处理结果", "结果")),
-        ):
-            value = _label_value(content, labels)
-            if value:
-                changes[field] = value
-        priority = _priority(_label_value(content, ("优先级",)))
-        if priority:
-            changes["priority"] = priority
-        missing = []
-        if not work_order_id:
-            missing.append("work_order_id")
-        if not changes:
-            missing.append("changes")
+        payload = extract_write_payload("update_work_order", content)
+        changes = payload["changes"]
+        missing = missing_write_fields("update_work_order", payload)
         return {
             "tool_id": "update_work_order",
-            "payload": {"work_order_id": work_order_id or "", "changes": changes},
+            "payload": {"work_order_id": payload["work_order_id"], "changes": changes},
             "missing_fields": missing,
         }
     if "关闭" in content and "工单" in content and not negated("关闭") and "close_work_order" in allowed_tool_ids:
-        result = _label_value(content, ("处理结果", "结果", "说明"))
-        missing = []
-        if not work_order_id:
-            missing.append("work_order_id")
-        if not result:
-            missing.append("result")
+        payload = extract_write_payload("close_work_order", content)
+        result = payload["result"]
+        missing = missing_write_fields("close_work_order", payload)
         return {
             "tool_id": "close_work_order",
-            "payload": {"work_order_id": work_order_id or "", "result": result},
+            "payload": {"work_order_id": payload["work_order_id"], "result": result},
             "missing_fields": missing,
         }
     if "删除" in content and "工单" in content and not negated("删除") and "delete_work_order" in allowed_tool_ids:

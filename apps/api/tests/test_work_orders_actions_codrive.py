@@ -111,6 +111,73 @@ class WorkOrderActionCodriveTests(unittest.TestCase):
         self.assertTrue(replay["idempotent_replay"])
         self.assertEqual(len(work_orders.list_orders(scope="EMPLOYEE")), before + 1)
 
+    def test_employee_write_executes_immediately_without_confirmation(self):
+        release = self.publish_tools(["update_work_order"])
+        action = action_gateway.execute_staff_action(
+            tool_name="update_work_order",
+            payload={
+                "work_order_id": "WO-20260721-001",
+                "changes": {"description": "员工已直接更新"},
+            },
+            release_id=release["id"],
+            idempotency_key="staff-direct-update",
+        )
+        self.assertEqual(action["status"], "SUCCEEDED")
+        self.assertEqual(action["required_confirmations"], 0)
+        self.assertFalse(action["requires_confirmation"])
+        self.assertEqual(action["receipt"]["actor"], "STAFF")
+        self.assertEqual(
+            work_orders.get_order("WO-20260721-001")["description"],
+            "员工已直接更新",
+        )
+
+    def test_multiturn_create_collects_fields_and_text_confirmation_cannot_fake_write(self):
+        self.publish_tools(["create_work_order"])
+        before = len(work_orders.list_orders(scope="EMPLOYEE"))
+        first = "".join(execute_chat(None, "我房子在漏水，我要报修创建工单"))
+        self.assertIn("missing_fields", first)
+        conversation_id = db.list_conversations(1)[0]["id"]
+        second = "".join(
+            execute_chat(
+                conversation_id,
+                """- **subject**（工单标题）：房屋漏水紧急报修
+- **description**（详细描述）：厨房天花板严重漏水，需要立即维修
+- **category**（工单类别）：房屋维修
+- **priority**（优先级）：紧急""",
+            )
+        )
+        self.assertIn("event: action_pending", second)
+        collection = db.get_open_action_collection(conversation_id)
+        self.assertEqual(collection["status"], "AWAITING_CONFIRMATION")
+        self.assertEqual(collection["payload"]["priority"], "URGENT")
+        action = action_gateway.get_action(collection["action_id"], include_audit=False)
+        self.assertEqual(action["payload"]["subject"], "房屋漏水紧急报修")
+        third = "".join(execute_chat(conversation_id, "正确"))
+        self.assertIn("不能由模型文字代替执行", third)
+        self.assertEqual(len(work_orders.list_orders(scope="EMPLOYEE")), before)
+        with db.connection() as conn:
+            route = conn.execute(
+                """
+                SELECT payload_json FROM trace_events
+                WHERE run_id=(SELECT id FROM runs ORDER BY started_at DESC, id DESC LIMIT 1)
+                  AND event_type='route_decision'
+                ORDER BY sequence DESC LIMIT 1
+                """
+            ).fetchone()
+        self.assertEqual(json.loads(route["payload_json"])["target_agent"], "work-order-service")
+
+    def test_markdown_english_labels_are_parsed_without_cloud_guessing(self):
+        plan = work_orders.plan_write(
+            """创建工单
+**subject**（工单标题）：漏水维修
+**description**（详细描述）：厨房漏水
+**category**（工单类别）：房屋维修
+**priority**（优先级）：紧急""",
+            {"create_work_order"},
+        )
+        self.assertEqual(plan["missing_fields"], [])
+        self.assertEqual(plan["payload"]["priority"], "URGENT")
+
     def test_update_close_and_soft_delete_share_gateway(self):
         release = self.publish_tools(
             ["update_work_order", "close_work_order", "delete_work_order"]
@@ -246,6 +313,11 @@ class WorkOrderActionCodriveTests(unittest.TestCase):
         self.assertIn("/codrive/messages", script)
         self.assertNotIn("<button>结束会话", script)
         self.assertNotIn("<button>结束共驾", script)
+        self.assertIn("/api/employee/work-orders/actions", script)
+        self.assertIn("员工提交后直接写入", script)
+        self.assertNotIn("填写要更新的工单描述（只生成草稿", script)
+        self.assertNotIn(">删除草稿</button>", script)
+        self.assertIn("confirmableActions", script)
 
 
 if __name__ == "__main__":

@@ -53,6 +53,23 @@ class FakeAdapter:
         yield {"kind": "result", "snap": snap("call_main_test", "INCOMPLETE")}
 
 
+class HallucinatingWriteAdapter(FakeAdapter):
+    def stream(self, _messages):
+        yield {
+            "kind": "delta",
+            "content": "工单已创建成功，系统返回工单编号为 WK240101-001。",
+        }
+        yield {"kind": "result", "snap": snap("call_main_fake_write", "COMPLETE")}
+
+
+class RecordingAdapter(FakeAdapter):
+    router_calls = []
+
+    def complete(self, messages):
+        self.__class__.router_calls.append(messages)
+        return super().complete(messages)
+
+
 class RuntimeUsageTests(unittest.TestCase):
     def test_answer_survives_missing_usage_without_fake_cost(self):
         original_settings = db.settings
@@ -103,6 +120,66 @@ class RuntimeUsageTests(unittest.TestCase):
                         "SELECT COUNT(*) AS n FROM badcase_candidates"
                     ).fetchone()["n"]
                 self.assertEqual(candidate_count, 1)
+            finally:
+                runtime.DeepSeekAdapter = original_adapter
+                db.settings = original_settings
+
+    def test_router_cloud_call_receives_recent_conversation_context(self):
+        original_settings = db.settings
+        original_adapter = runtime.DeepSeekAdapter
+        with tempfile.TemporaryDirectory() as directory:
+            db.settings = dataclasses.replace(
+                original_settings, db_path=f"{directory}/test.sqlite"
+            )
+            runtime.DeepSeekAdapter = RecordingAdapter
+            RecordingAdapter.router_calls = []
+            try:
+                db.init_db()
+                list(runtime.execute_chat(None, "我先说明：厨房天花板正在漏水"))
+                conversation_id = db.list_conversations(1)[0]["id"]
+                list(runtime.execute_chat(conversation_id, "请继续处理这个问题"))
+                second_router_messages = RecordingAdapter.router_calls[-1]
+                joined = json.dumps(second_router_messages, ensure_ascii=False)
+                self.assertIn("厨房天花板正在漏水", joined)
+                self.assertIn("请继续处理这个问题", joined)
+                run = db.list_runs(1)[0]
+                detail = db.get_run_detail(run["id"])
+                context_event = next(
+                    item
+                    for item in detail["trace_events"]
+                    if item["event_type"] == "router_context_prepared"
+                )
+                self.assertGreaterEqual(context_event["payload"]["message_count"], 3)
+            finally:
+                runtime.DeepSeekAdapter = original_adapter
+                db.settings = original_settings
+
+    def test_unverified_write_success_claim_is_blocked_and_recorded(self):
+        original_settings = db.settings
+        original_adapter = runtime.DeepSeekAdapter
+        with tempfile.TemporaryDirectory() as directory:
+            db.settings = dataclasses.replace(
+                original_settings, db_path=f"{directory}/test.sqlite"
+            )
+            runtime.DeepSeekAdapter = HallucinatingWriteAdapter
+            try:
+                db.init_db()
+                events = "".join(runtime.execute_chat(None, "请介绍一下你能提供什么帮助"))
+                self.assertNotIn("WK240101-001", events)
+                self.assertIn("没有获得真实写 Tool 回执", events)
+                run = db.list_runs(1)[0]
+                detail = db.get_run_detail(run["id"])
+                event_types = [item["event_type"] for item in detail["trace_events"]]
+                self.assertIn("output_guard_applied", event_types)
+                with db.connection() as conn:
+                    codes = [
+                        row["rule_code"]
+                        for row in conn.execute(
+                            "SELECT rule_code FROM badcase_candidates WHERE run_id=?",
+                            (run["id"],),
+                        ).fetchall()
+                    ]
+                self.assertIn("UNVERIFIED_WRITE_CLAIM_BLOCKED", codes)
             finally:
                 runtime.DeepSeekAdapter = original_adapter
                 db.settings = original_settings

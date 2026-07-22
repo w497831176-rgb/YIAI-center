@@ -144,6 +144,11 @@ function persistActionToken(action) {
   localStorage.setItem("yiai-action-tokens", JSON.stringify(state.actionTokens));
 }
 
+function isTextConfirmation(value) {
+  return ["确认", "正确", "没问题", "确认创建", "确认提交", "同意", "yes", "ok"]
+    .includes(String(value || "").replace(/[\s，。！？!,.]/g, "").toLowerCase());
+}
+
 function workOrderStatus(value) {
   return ({ OPEN: "待处理", IN_PROGRESS: "处理中", CLOSED: "已关闭" })[value] || value;
 }
@@ -396,7 +401,7 @@ function codriveTable() {
 function employeePage() {
   const selected = state.selectedCodrive;
   if (state.employeeSection === "workorders") {
-    return `<section class="role-workspace">${roleSubnav("employee")}${panelHeading("EMPLOYEE WORK ORDERS", "我的工单", "以列表查看和发起工单操作；写操作仍需统一确认。")}${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}${workOrderTable(state.employeeWorkOrders, true)}${state.employeeActions.length ? `<section class="employee-section"><div class="subsection-heading"><div><h2>工单操作与回执</h2><p>所有写操作统一进入 Action Gateway。</p></div></div><div class="business-grid">${state.employeeActions.map(actionCard).join("")}</div></section>` : ""}</section>`;
+    return `<section class="role-workspace">${roleSubnav("employee")}${panelHeading("EMPLOYEE WORK ORDERS", "我的工单", "员工是人工操作者：更新、关闭和删除会直接写入并保留审计回执，不生成 AI 确认卡。")}${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}${workOrderTable(state.employeeWorkOrders, true)}</section>`;
   }
   return `<section class="role-workspace employee-workspace">
     ${roleSubnav("employee")}
@@ -458,27 +463,37 @@ function agentPanel() {
     <div class="management-grid">
       ${state.agents.length ? state.agents.map(agentCard).join("") : `<div class="run-empty">还没有垂直 Agent，请点击右上角新增。</div>`}
     </div>
-    ${state.agentEditorOpen ? editorDialog(current ? `配置·${current.name}` : "新增垂直 Agent", "保存的是草稿；创建候选 Release 并人工发布后才影响新消息。", `<form class="capability-form modal-capability-form" id="agent-form" data-agent-id="${escapeHtml(current?.id || "")}">
-      <label><span>Agent 名称</span><input name="name" maxlength="80" value="${escapeHtml(current?.name || "")}" required /></label>
-      <label><span>稳定 ID</span><input value="${escapeHtml(current?.id || "创建后自动生成")}" disabled /></label>
-      <label class="full"><span>业务说明</span><textarea name="description" rows="3" maxlength="500" required>${escapeHtml(current?.description || "")}</textarea></label>
-      <label class="full"><span>System Prompt</span><textarea name="system_prompt" rows="8" maxlength="20000" required>${escapeHtml(current?.system_prompt || "")}</textarea></label>
-      <fieldset class="full binding-group"><legend>Skill</legend>
+    ${state.agentEditorOpen ? editorDialog(current ? `配置·${current.name}` : "新增垂直 Agent", "在一个连续表单内完成基本信息与能力装配；发布新 Release 后才影响新消息。", `<form class="capability-form modal-capability-form agent-configuration-form" id="agent-form" data-agent-id="${escapeHtml(current?.id || "")}">
+      <section class="agent-form-section">
+        <div class="agent-form-section-head"><div><span>01</span><h3>基本信息</h3></div><p>定义这个垂直 Agent 负责什么，以及回答和执行的边界。</p></div>
+        <div class="agent-basic-grid">
+          <label><span>Agent 名称</span><input name="name" maxlength="80" value="${escapeHtml(current?.name || "")}" required /></label>
+          <label><span>稳定 ID</span><input value="${escapeHtml(current?.id || "创建后自动生成")}" disabled /></label>
+          <label class="full"><span>业务说明</span><textarea name="description" rows="3" maxlength="500" required>${escapeHtml(current?.description || "")}</textarea></label>
+          <label class="full"><span>System Prompt</span><textarea name="system_prompt" rows="8" maxlength="20000" required>${escapeHtml(current?.system_prompt || "")}</textarea></label>
+        </div>
+      </section>
+      <section class="agent-form-section">
+        <div class="agent-form-section-head"><div><span>02</span><h3>能力装配</h3></div><p>所有能力都从 Agent 内绑定；候选 Release 会固定实际版本与关系。</p></div>
+        <div class="agent-binding-grid">
+      <fieldset class="binding-group"><legend>Skill</legend>
         <p>只显示已经校验通过的 Skill；具体不可变版本在创建 Candidate 时固定。</p>
         ${validSkills.length ? validSkills.map((skill) => `<label><input type="checkbox" name="skill_ids" value="${escapeHtml(skill.id)}" ${skillIds.has(skill.id) ? "checked" : ""} /> <strong>${escapeHtml(skill.name)}</strong><small>${escapeHtml(skill.current_version.id)}</small></label>`).join("") : `<div class="run-empty">暂无已校验 Skill。请先在 Skill 页面创建并校验。</div>`}
       </fieldset>
-      <fieldset class="full binding-group"><legend>RAG</legend>
+      <fieldset class="binding-group"><legend>RAG</legend>
         <p>只显示已经校验通过的 RAG 文档。</p>
         ${validRag.length ? validRag.map((document) => `<label><input type="checkbox" name="rag_document_ids" value="${escapeHtml(document.id)}" ${ragIds.has(document.id) ? "checked" : ""} /> <strong>${escapeHtml(document.name)}</strong><small>${escapeHtml(document.current_version.id)}</small></label>`).join("") : `<div class="run-empty">暂无已校验 RAG 文档。请先在 RAG 页面创建并校验。</div>`}
       </fieldset>
-      <fieldset class="full binding-group"><legend>MCP Tool</legend>
+      <fieldset class="binding-group"><legend>MCP Tool</legend>
         <p>按 Tool 绑定，而不是把整个 Server 的所有 Tool 一次性交给 Agent。</p>
         ${connectedMcp.length ? connectedMcp.map((server) => `<div class="binding-server"><strong>${escapeHtml(server.name)}</strong><small>${escapeHtml(server.endpoint)}</small>${(server.allowed_tools || []).map((toolName) => { const key = `${server.id}::${toolName}`; return `<label><input type="checkbox" name="mcp_tool_bindings" value="${escapeHtml(key)}" ${mcpBindings.has(key) ? "checked" : ""} /> ${escapeHtml(toolName)}</label>`; }).join("") || `<div class="run-empty">没有可绑定的只读 Tool。</div>`}</div>`).join("") : `<div class="run-empty">暂无已连接的远程 MCP Server。</div>`}
       </fieldset>
-      <fieldset class="full binding-group"><legend>预置 Tool</legend>
+      <fieldset class="binding-group"><legend>预置 Tool</legend>
         ${presetTools.length ? presetTools.map((tool) => `<label><input type="checkbox" name="tool_ids" value="${escapeHtml(tool.id)}" ${toolIds.has(tool.id) ? "checked" : ""} /> <strong>${escapeHtml(tool.name)}</strong><small>${tool.read_only ? "只读" : "写操作 · 必须确认"} · ${escapeHtml(tool.id)}</small></label>`).join("") : `<div class="run-empty">当前版本没有已登记的预置 Tool，不使用占位 Tool 冒充真实能力。</div>`}
       </fieldset>
-      <div class="form-actions full"><button>保存 Agent 草稿</button></div>
+        </div>
+      </section>
+      <div class="agent-form-footer"><p>保存配置不会改写当前 Active Release；请在 Release 管理中查看 Diff 后人工发布。</p><div class="form-actions"><button>保存 Agent 配置</button><button type="button" class="secondary" data-action="close-agent-editor">取消</button></div></div>
     </form>`, "close-agent-editor", true) : ""}
   </div>`;
 }
@@ -498,7 +513,7 @@ function agentCard(agent) {
     <div class="capability-counts"><span><strong>${(agent.skill_ids || []).length}</strong> Skill</span><span><strong>${(agent.rag_document_ids || []).length}</strong> RAG</span><span><strong>${(agent.mcp_tool_bindings || []).length}</strong> MCP Tool</span><span><strong>${(agent.tool_ids || []).length}</strong> Tool</span></div>
     <div class="card-chip-list">${capabilities.length ? capabilities.slice(0, 5).map((item) => `<span>${escapeHtml(item)}</span>`).join("") : `<span class="muted-chip">尚未装配能力</span>`}</div>
     <div class="management-card-meta"><span>更新时间</span><strong>${formatTime(agent.updated_at)}</strong></div>
-    <div class="card-actions"><button class="secondary" data-agent-action="edit" data-agent-id="${escapeHtml(agent.id)}">配置</button><button class="danger-button" data-agent-action="delete" data-agent-id="${escapeHtml(agent.id)}">删除草稿</button></div>
+    <div class="card-actions"><button class="secondary" data-agent-action="edit" data-agent-id="${escapeHtml(agent.id)}">配置</button><button class="danger-button" data-agent-action="delete" data-agent-id="${escapeHtml(agent.id)}">删除</button></div>
   </article>`;
 }
 
@@ -691,6 +706,7 @@ const eventLabels = {
   cloud_call_started: "云 API 调用开始",
   cloud_call_completed: "云 API 调用完成",
   router_fallback: "Router 兜底",
+  router_context_prepared: "Router 会话上下文",
   route_decision: "Router 决策",
   agent_selected: "选择垂直 Agent",
   skill_considered: "检查已发布 Skill",
@@ -716,6 +732,9 @@ const eventLabels = {
   action_confirmation_received: "收到操作确认",
   action_cancel_received: "收到操作取消",
   action_gateway_completed: "Action Gateway 回执",
+  action_confirmation_text_blocked: "文字确认受控拦截",
+  action_collection_cancelled: "取消写操作信息收集",
+  output_guard_applied: "无回执写成功声明拦截",
   codrive_handoff_requested: "发起人机共驾",
   codrive_policy_evaluated: "AI 转人工策略判断",
   codrive_ai_suppressed: "员工持有输出权，AI 待命",
@@ -1214,11 +1233,11 @@ async function loadUserData() {
 }
 
 async function loadEmployeeData() {
-  [state.employeeWorkOrders, state.codriveSessions, state.employeeActions] = await Promise.all([
+  [state.employeeWorkOrders, state.codriveSessions] = await Promise.all([
     api("/api/work-orders?scope=EMPLOYEE"),
     api("/api/codrive/sessions?include_ai_active=true"),
-    api("/api/actions"),
   ]);
+  state.employeeActions = [];
   if (state.selectedCodrive) {
     await openCodrive(state.selectedCodrive.conversation_id, false);
   }
@@ -1321,32 +1340,33 @@ async function createEmployeeAction(workOrderId, operation) {
   let toolName;
   let payload;
   if (operation === "update") {
-    const description = window.prompt("填写要更新的工单描述（只生成草稿，确认后才写入）", order.description);
+    const description = window.prompt("填写要更新的工单描述（员工提交后直接写入）", order.description);
     if (description == null || !description.trim()) return;
     toolName = "update_work_order";
     payload = { work_order_id: workOrderId, changes: { description: description.trim() } };
   } else if (operation === "close") {
-    const result = window.prompt("填写关闭处理结果（只生成草稿，确认后才写入）", order.result || "问题已处理");
+    const result = window.prompt("填写关闭处理结果（员工提交后直接写入）", order.result || "问题已处理");
     if (result == null || !result.trim()) return;
     toolName = "close_work_order";
     payload = { work_order_id: workOrderId, result: result.trim() };
   } else {
-    if (!window.confirm(`为工单 ${workOrderId} 生成软删除草稿吗？生成草稿不会删除，执行仍需两次确认。`)) return;
+    if (!window.confirm(`确定直接软删除工单 ${workOrderId} 吗？操作会立即写入并保留审计记录。`)) return;
     toolName = "delete_work_order";
     payload = { work_order_id: workOrderId };
   }
-  const action = await api("/api/actions/drafts", {
+  const response = await api("/api/employee/work-orders/actions", {
     method: "POST",
     body: JSON.stringify({
       tool_name: toolName,
       payload,
       release_id: state.workspace.active_release_id,
       idempotency_key: `employee-${toolName}-${workOrderId}-${Date.now()}`,
-      actor: "STAFF",
     }),
   });
-  persistActionToken(action);
-  state.notice = "操作草稿已生成，尚未写入。请在下方确认卡核对。";
+  const receipt = response.receipt || {};
+  state.notice = receipt.status === "SUCCEEDED"
+    ? `${response.message} 工单 ${receipt.work_order_id || workOrderId}。`
+    : `${response.message} 请查看审计记录。`;
   await loadEmployeeData();
   render();
 }
@@ -1415,9 +1435,9 @@ async function agentAction(agentId, action) {
     return;
   }
   const agent = state.agents.find((item) => item.id === agentId);
-  if (!agent || !window.confirm(`确定删除 Agent 草稿“${agent.name}”吗？当前 Active Release 和历史 Run 不会被改写。`)) return;
+  if (!agent || !window.confirm(`确定删除 Agent 配置“${agent.name}”吗？当前 Active Release 和历史 Run 不会被改写。`)) return;
   await api(`/api/agents/${agentId}`, { method: "DELETE" });
-  state.notice = `Agent 草稿“${agent.name}”已删除。Active Release 仍保留原快照，发布新 Release 后才从新消息移除。`;
+  state.notice = `Agent 配置“${agent.name}”已删除。Active Release 仍保留原快照，发布新 Release 后才从新消息移除。`;
   await loadPlatform();
   render();
 }
@@ -1645,6 +1665,14 @@ async function sendChat(event) {
   const input = document.querySelector("#chat-input");
   const text = input.value.trim();
   if (!text || state.sending) return;
+  const confirmableActions = state.actions.filter((action) =>
+    action.status === "AWAITING_CONFIRMATION" && state.actionTokens[action.id]
+  );
+  if (isTextConfirmation(text) && confirmableActions.length === 1) {
+    input.value = "";
+    await performAction(confirmableActions[0].id, "confirm", confirmableActions[0].version);
+    return;
+  }
   const now = new Date().toISOString();
   state.sending = true;
   state.streamTerminal = null;

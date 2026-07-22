@@ -319,6 +319,26 @@ ON run_evaluations(evaluated_at DESC);
 """
 
 
+MIGRATION_11 = """
+CREATE TABLE IF NOT EXISTS conversation_action_collections (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),
+    release_id TEXT NOT NULL REFERENCES releases(id),
+    agent_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    missing_fields_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN (
+        'COLLECTING','AWAITING_CONFIRMATION','SUCCEEDED','FAILED','CANCELLED'
+    )),
+    action_id TEXT REFERENCES action_requests(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_action_collections_status
+ON conversation_action_collections(status, updated_at DESC);
+"""
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "router": {
         "id": "router-default",
@@ -439,6 +459,13 @@ def init_db() -> None:
                 (now_iso(),),
             )
             applied.add(10)
+        if 11 not in applied:
+            conn.executescript(MIGRATION_11)
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(11, ?)",
+                (now_iso(),),
+            )
+            applied.add(11)
         count = conn.execute("SELECT COUNT(*) AS n FROM releases").fetchone()["n"]
         if count == 0:
             release_id = "rel_v055_default"
@@ -2025,6 +2052,114 @@ def conversation_history(conversation_id: str, limit: int = 12) -> list[dict[str
                 item = {"role": "user", "content": f"【员工回复】{item['content']}"}
             result.append(item)
         return result
+
+
+def _decode_action_collection(row) -> dict[str, Any]:
+    item = dict(row)
+    item["payload"] = json.loads(item.pop("payload_json"))
+    item["missing_fields"] = json.loads(item.pop("missing_fields_json"))
+    return item
+
+
+def get_open_action_collection(conversation_id: str) -> dict[str, Any] | None:
+    with connection() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM conversation_action_collections
+            WHERE conversation_id=?
+              AND status IN ('COLLECTING','AWAITING_CONFIRMATION')
+            """,
+            (conversation_id,),
+        ).fetchone()
+    return _decode_action_collection(row) if row is not None else None
+
+
+def save_action_collection(
+    *,
+    conversation_id: str,
+    release_id: str,
+    agent_id: str,
+    tool_name: str,
+    payload: dict[str, Any],
+    missing_fields: list[str],
+) -> dict[str, Any]:
+    now = now_iso()
+    with connection() as conn:
+        existing = conn.execute(
+            "SELECT created_at FROM conversation_action_collections WHERE conversation_id=?",
+            (conversation_id,),
+        ).fetchone()
+        created_at = existing["created_at"] if existing is not None else now
+        conn.execute(
+            """
+            INSERT INTO conversation_action_collections(
+                conversation_id, release_id, agent_id, tool_name, payload_json,
+                missing_fields_json, status, action_id, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, 'COLLECTING', NULL, ?, ?)
+            ON CONFLICT(conversation_id) DO UPDATE SET
+                release_id=excluded.release_id,
+                agent_id=excluded.agent_id,
+                tool_name=excluded.tool_name,
+                payload_json=excluded.payload_json,
+                missing_fields_json=excluded.missing_fields_json,
+                status='COLLECTING',
+                action_id=NULL,
+                updated_at=excluded.updated_at
+            """,
+            (
+                conversation_id,
+                release_id,
+                agent_id,
+                tool_name,
+                json.dumps(payload, ensure_ascii=False),
+                json.dumps(missing_fields, ensure_ascii=False),
+                created_at,
+                now,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM conversation_action_collections WHERE conversation_id=?",
+            (conversation_id,),
+        ).fetchone()
+    return _decode_action_collection(row)
+
+
+def attach_action_collection(conversation_id: str, action_id: str) -> None:
+    with connection() as conn:
+        conn.execute(
+            """
+            UPDATE conversation_action_collections
+            SET status='AWAITING_CONFIRMATION', action_id=?, updated_at=?
+            WHERE conversation_id=? AND status='COLLECTING'
+            """,
+            (action_id, now_iso(), conversation_id),
+        )
+
+
+def finish_action_collection(action_id: str, status: str) -> None:
+    normalized = status if status in {"SUCCEEDED", "FAILED", "CANCELLED"} else "FAILED"
+    with connection() as conn:
+        conn.execute(
+            """
+            UPDATE conversation_action_collections
+            SET status=?, updated_at=?
+            WHERE action_id=? AND status='AWAITING_CONFIRMATION'
+            """,
+            (normalized, now_iso(), action_id),
+        )
+
+
+def cancel_action_collection(conversation_id: str) -> bool:
+    with connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE conversation_action_collections
+            SET status='CANCELLED', updated_at=?
+            WHERE conversation_id=? AND status='COLLECTING'
+            """,
+            (now_iso(), conversation_id),
+        )
+    return cursor.rowcount == 1
 
 
 def list_conversations(limit: int = 100) -> list[dict[str, Any]]:

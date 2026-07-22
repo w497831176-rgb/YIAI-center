@@ -222,6 +222,29 @@ class YIAIHandler(BaseHTTPRequestHandler):
             self._codrive_return_stream(path)
             return
         try:
+            if path == "/api/employee/work-orders/actions":
+                payload = self._read_json()
+                release_id = str(payload.get("release_id", "")).strip()
+                if not release_id:
+                    release_id = db.get_workspace()["active_release_id"]
+                action = action_gateway.execute_staff_action(
+                    tool_name=str(payload.get("tool_name", "")).strip(),
+                    payload=payload.get("payload")
+                    if isinstance(payload.get("payload"), dict)
+                    else {},
+                    release_id=release_id,
+                    idempotency_key=str(payload.get("idempotency_key", "")).strip(),
+                )
+                self._send_json(
+                    {
+                        "action": action,
+                        "receipt": action.get("receipt"),
+                        "message": (action.get("receipt") or {}).get("message")
+                        or "员工操作未成功执行。",
+                    },
+                    201,
+                )
+                return
             if path == "/api/actions/drafts":
                 payload = self._read_json()
                 release_id = str(payload.get("release_id", "")).strip()
@@ -623,6 +646,8 @@ class YIAIHandler(BaseHTTPRequestHandler):
                 expected_version=payload.get("expected_version"),
                 actor="USER",
             )
+        if action["status"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            db.finish_action_collection(action_id, action["status"])
         if action["status"] == "SUCCEEDED":
             receipt = action.get("receipt") or {}
             answer = (

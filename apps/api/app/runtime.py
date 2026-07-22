@@ -462,6 +462,39 @@ def execute_chat(
         }
         for item in released_agents
     ]
+    action_collection = db.get_open_action_collection(run["conversation_id"])
+    router_history = db.conversation_history(run["conversation_id"], limit=10)
+    trace(
+        run,
+        "router_context_prepared",
+        {
+            "message_count": len(router_history),
+            "messages": router_history,
+            "open_action_collection": {
+                "agent_id": action_collection["agent_id"],
+                "tool_name": action_collection["tool_name"],
+                "status": action_collection["status"],
+                "missing_fields": action_collection["missing_fields"],
+            }
+            if action_collection
+            else None,
+        },
+    )
+    collection_context = (
+        "\n当前会话存在尚未结束的结构化写操作："
+        + json.dumps(
+            {
+                "agent_id": action_collection["agent_id"],
+                "tool_name": action_collection["tool_name"],
+                "status": action_collection["status"],
+                "missing_fields": action_collection["missing_fields"],
+            },
+            ensure_ascii=False,
+        )
+        + "。当前消息若是补充字段、确认、纠正或取消，必须延续该 Agent。"
+        if action_collection
+        else ""
+    )
     router_prompt = [
         {
             "role": "system",
@@ -469,12 +502,15 @@ def execute_chat(
                 "你是唯一 Router。只能从当前 Release 提供的 Agent 清单中"
                 "选择一个，根据名称和业务说明匹配用户意图。\n"
                 f"Agent 清单：{json.dumps(agent_catalog, ensure_ascii=False)}\n"
+                "必须结合下方最近会话，而不是只看最后一句。短句如‘正确’、‘确认’、"
+                "字段补充或代词，必须延续其直接上文的业务意图。"
+                f"{collection_context}\n"
                 "只输出一个 JSON 对象："
                 '{"target_agent":"...","confidence":0到1,"reason":"...",'
                 '"needs_clarification":false}。禁止数组和多个 Agent。'
             ),
         },
-        {"role": "user", "content": content},
+        *router_history,
     ]
 
     route: dict[str, Any]
@@ -503,6 +539,18 @@ def execute_chat(
             {"reason": type(exc).__name__, "target_agent": route["target_agent"]},
         )
 
+    if action_collection and action_collection["agent_id"] in allowed_agent_ids:
+        route = {
+            "target_agent": action_collection["agent_id"],
+            "confidence": 1.0,
+            "reason": (
+                f"当前会话存在 {action_collection['tool_name']} 的"
+                f"{action_collection['status']} 状态，本句属于该操作的连续上下文"
+            ),
+            "needs_clarification": False,
+            "source": "conversation_action_collection",
+        }
+
     agent = agent_by_id(run["release_config"], route["target_agent"])
     trace(run, "route_decision", route)
     trace(
@@ -516,7 +564,7 @@ def execute_chat(
         },
     )
 
-    if not resume_from_human and is_ambiguous_request(content):
+    if not resume_from_human and not action_collection and is_ambiguous_request(content):
         route["confidence"] = min(float(route.get("confidence", 0)), 0.45)
         route["needs_clarification"] = True
         route["reason"] = "请求缺少处理对象、问题事实和期望结果，无法可靠选择具体执行能力"
@@ -627,8 +675,120 @@ def execute_chat(
     )
     preset_read_result: dict[str, Any] | None = None
     preset_context = ""
-    write_plan = work_orders.plan_write(content, released_tool_ids)
+    if action_collection and action_collection["status"] == "AWAITING_CONFIRMATION":
+        pending_action = action_gateway.get_action(
+            action_collection["action_id"], include_audit=False
+        )
+        if work_orders.is_cancel_message(content):
+            cancelled = action_gateway.cancel_action(
+                pending_action["id"],
+                expected_version=pending_action["version"],
+                actor="USER",
+            )
+            db.finish_action_collection(cancelled["id"], "CANCELLED")
+            answer = "已取消待确认操作，工单数据没有发生变化。"
+            trace(
+                run,
+                "action_cancelled_from_conversation",
+                {"action_id": cancelled["id"], "tool_name": cancelled["tool_name"]},
+            )
+        else:
+            answer = (
+                "我已结合上文识别到你的确认，但写操作不能由模型文字代替执行。"
+                "请点击上方待确认卡中的“确认并执行”；只有 Action Gateway 返回真实回执后，"
+                "系统才会显示成功状态和真实工单编号。"
+                if work_orders.is_confirmation_message(content)
+                else "当前已有一项待确认写操作。请在确认卡中核对、确认或取消；确认前不会写入工单。"
+            )
+            trace(
+                run,
+                "action_confirmation_text_blocked",
+                {
+                    "action_id": pending_action["id"],
+                    "tool_name": pending_action["tool_name"],
+                    "reason": "one_time_confirmation_token_required",
+                    "raw_user_input": content,
+                },
+            )
+            yield sse("action_pending", pending_action)
+        yield sse("route_decision", route)
+        yield sse("agent_selected", {"agent_id": agent["id"], "agent_name": agent["name"]})
+        yield sse("delta", {"content": answer})
+        done = _finish_deterministic(
+            run,
+            agent,
+            answer,
+            started,
+            extra={
+                "action": {
+                    "action_id": pending_action["id"],
+                    "tool_name": pending_action["tool_name"],
+                    "status": "CANCELLED" if work_orders.is_cancel_message(content) else pending_action["status"],
+                    "confirmation_text_executed": False,
+                }
+            },
+        )
+        yield sse("done", done)
+        return
+
+    if (
+        action_collection
+        and action_collection["status"] == "COLLECTING"
+        and work_orders.is_cancel_message(content)
+    ):
+        db.cancel_action_collection(run["conversation_id"])
+        answer = "已取消本次工单信息收集，没有生成确认卡，也没有写入工单。"
+        trace(
+            run,
+            "action_collection_cancelled",
+            {"tool_name": action_collection["tool_name"], "raw_user_input": content},
+        )
+        yield sse("route_decision", route)
+        yield sse("agent_selected", {"agent_id": agent["id"], "agent_name": agent["name"]})
+        yield sse("delta", {"content": answer})
+        done = _finish_deterministic(run, agent, answer, started)
+        yield sse("done", done)
+        return
+
+    if action_collection and action_collection["status"] == "COLLECTING":
+        if action_collection["tool_name"] not in released_tool_ids:
+            db.cancel_action_collection(run["conversation_id"])
+            answer = "当前 Release 已不再允许这项写 Tool，已停止信息收集且没有写入工单。"
+            trace(
+                run,
+                "action_collection_release_rejected",
+                {
+                    "tool_name": action_collection["tool_name"],
+                    "release_id": run["release_id"],
+                },
+            )
+            yield sse("route_decision", route)
+            yield sse("agent_selected", {"agent_id": agent["id"], "agent_name": agent["name"]})
+            yield sse("delta", {"content": answer})
+            done = _finish_deterministic(run, agent, answer, started)
+            yield sse("done", done)
+            return
+        collected_payload = work_orders.merge_write_payload(
+            action_collection["tool_name"], action_collection["payload"], content
+        )
+        write_plan = {
+            "tool_id": action_collection["tool_name"],
+            "payload": collected_payload,
+            "missing_fields": work_orders.missing_write_fields(
+                action_collection["tool_name"], collected_payload
+            ),
+        }
+    else:
+        write_plan = work_orders.plan_write(content, released_tool_ids)
     if write_plan:
+        collection = db.save_action_collection(
+            conversation_id=run["conversation_id"],
+            release_id=run["release_id"],
+            agent_id=agent["id"],
+            tool_name=write_plan["tool_id"],
+            payload=write_plan["payload"],
+            missing_fields=write_plan["missing_fields"],
+        )
         trace(
             run,
             "preset_tool_selected",
@@ -657,6 +817,8 @@ def execute_chat(
                     "tool_name": write_plan["tool_id"],
                     "missing_fields": write_plan["missing_fields"],
                     "raw_user_input": content,
+                    "collected_payload": write_plan["payload"],
+                    "collection_status": collection["status"],
                 },
             )
             yield sse("delta", {"content": answer})
@@ -673,11 +835,15 @@ def execute_chat(
             tool_name=write_plan["tool_id"],
             payload=write_plan["payload"],
             release_id=run["release_id"],
-            idempotency_key=f"{run['run_id']}:{write_plan['tool_id']}",
+            idempotency_key=(
+                f"collection:{run['conversation_id']}:{collection['created_at']}:"
+                f"{write_plan['tool_id']}"
+            ),
             conversation_id=run["conversation_id"],
             source_run_id=run["run_id"],
             actor="USER",
         )
+        db.attach_action_collection(run["conversation_id"], action["id"])
         trace(
             run,
             "action_draft_created",
@@ -1015,10 +1181,20 @@ def execute_chat(
     )
 
     history = db.conversation_history(run["conversation_id"], limit=12)
+    write_safety_context = (
+        "\n\n【运行时写操作硬约束】本轮没有获得 Action Gateway 的成功回执。"
+        "不得声称任何工单已经创建、更新、关闭或删除；不得编造工单编号、系统返回值或员工处理结果。"
+        "用户的‘确认’文字也不是执行回执。只有运行时注入的真实 Tool/Action 回执才能作为成功依据。"
+    )
     messages = [
         {
             "role": "system",
-            "content": agent["system_prompt"] + skill_prompt(skills) + rag.prompt_context(rag_result) + mcp_context + preset_context,
+            "content": agent["system_prompt"]
+            + write_safety_context
+            + skill_prompt(skills)
+            + rag.prompt_context(rag_result)
+            + mcp_context
+            + preset_context,
         },
         *history,
     ]
@@ -1056,6 +1232,41 @@ def execute_chat(
         answer, used_citations, removed_citations = rag.sanitize_citations(
             "".join(answer_parts), rag_result["citations"]
         )
+        if work_orders.contains_unverified_write_success(answer):
+            original_answer = answer
+            answer = (
+                "本轮没有获得真实写 Tool 回执，因此不能确认工单已创建，也不能提供工单编号。"
+                "如页面已有待确认卡，请通过确认卡执行；成功后系统会展示 Action Gateway 的真实回执。"
+            )
+            candidate = db.record_badcase_candidate(
+                run["run_id"],
+                "UNVERIFIED_WRITE_CLAIM_BLOCKED",
+                {
+                    "original_answer": original_answer,
+                    "replacement_answer": answer,
+                    "reason": "no_successful_action_gateway_receipt_in_current_run",
+                },
+            )
+            trace(
+                run,
+                "output_guard_applied",
+                {
+                    "guard": "verified_write_receipt_required",
+                    "blocked_claim": original_answer,
+                    "replacement": answer,
+                },
+            )
+            trace(
+                run,
+                "badcase_detected",
+                {
+                    "candidate_id": candidate["id"],
+                    "rule_code": candidate["rule_code"],
+                    "status": candidate["status"],
+                    "evidence": candidate["evidence"],
+                    "scope": "CURRENT_RUN_ONLY",
+                },
+            )
         trace(
             run,
             "rag_citation_validation",

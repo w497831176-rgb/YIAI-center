@@ -247,6 +247,149 @@ def create_draft(
         return result
 
 
+def execute_staff_action(
+    *,
+    tool_name: str,
+    payload: dict[str, Any],
+    release_id: str,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """Execute a human employee write immediately while retaining a full audit receipt."""
+    from . import db
+
+    idempotency_key = str(idempotency_key).strip()
+    if not idempotency_key or len(idempotency_key) > 200:
+        raise ValueError("idempotency_key 必须为 1-200 个字符")
+    validated = work_orders.validate_write_payload(tool_name, payload)
+    before = work_orders.before_snapshot(tool_name, validated)
+    now = _now()
+    action_id = db.new_id("action")
+    with db.connection() as conn:
+        release = conn.execute(
+            "SELECT config_json FROM releases WHERE id=?", (release_id,)
+        ).fetchone()
+        if release is None:
+            raise ValueError("Release 不存在")
+        release_config = json.loads(release["config_json"])
+        released_tool = next(
+            (
+                item
+                for item in release_config.get("tools", [])
+                if item.get("tool_id") == tool_name and item.get("agent_ids")
+            ),
+            None,
+        )
+        if released_tool is None:
+            raise ValueError("该预置 Tool 未绑定到此 Release 的垂直 Agent")
+        existing = conn.execute(
+            "SELECT * FROM action_requests WHERE idempotency_key=?",
+            (idempotency_key,),
+        ).fetchone()
+        if existing is not None:
+            result = _decode(existing)
+            result["idempotent_replay"] = True
+            result["confirmation_token"] = None
+            return result
+        conn.execute(
+            """
+            INSERT INTO action_requests(
+                id, conversation_id, source_run_id, confirmation_run_id,
+                release_id, tool_name, payload_json, before_json, status,
+                confirmation_step, required_confirmations, current_token_hash,
+                idempotency_key, version, result_json, receipt_json,
+                error_message, created_at, updated_at, executed_at
+            ) VALUES(?, NULL, NULL, NULL, ?, ?, ?, ?, 'EXECUTING',
+                     0, 0, NULL, ?, 1, NULL, NULL, NULL, ?, ?, NULL)
+            """,
+            (
+                action_id,
+                release_id,
+                tool_name,
+                _json(validated),
+                _json(before) if before is not None else None,
+                idempotency_key,
+                now,
+                now,
+            ),
+        )
+        _audit(
+            conn,
+            action_id,
+            "staff_execution_started",
+            None,
+            "EXECUTING",
+            "STAFF",
+            {"payload": validated, "before": before, "confirmation_required": False},
+            now,
+        )
+        new_order_id = _work_order_number(conn, now) if tool_name == "create_work_order" else None
+        try:
+            work_order = work_orders.apply_write(
+                conn, tool_name, validated, now, new_order_id=new_order_id
+            )
+            receipt = {
+                "action_id": action_id,
+                "tool_name": tool_name,
+                "status": "SUCCEEDED",
+                "work_order_id": work_order["id"],
+                "message": "员工操作已直接写入。",
+                "executed_at": now,
+                "actor": "STAFF",
+                "confirmation_required": False,
+            }
+            conn.execute(
+                """
+                UPDATE action_requests
+                SET status='SUCCEEDED', result_json=?, receipt_json=?, version=2,
+                    updated_at=?, executed_at=? WHERE id=?
+                """,
+                (_json(work_order), _json(receipt), now, now, action_id),
+            )
+            _audit(
+                conn,
+                action_id,
+                "staff_execution_succeeded",
+                "EXECUTING",
+                "SUCCEEDED",
+                "STAFF",
+                {"receipt": receipt, "result": work_order},
+                now,
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {str(exc)}"[:1000]
+            receipt = {
+                "action_id": action_id,
+                "tool_name": tool_name,
+                "status": "FAILED",
+                "message": "员工操作执行失败，未自动重试。",
+                "executed_at": now,
+                "actor": "STAFF",
+                "confirmation_required": False,
+            }
+            conn.execute(
+                """
+                UPDATE action_requests
+                SET status='FAILED', receipt_json=?, error_message=?, version=2,
+                    updated_at=?, executed_at=? WHERE id=?
+                """,
+                (_json(receipt), error, now, now, action_id),
+            )
+            _audit(
+                conn,
+                action_id,
+                "staff_execution_failed",
+                "EXECUTING",
+                "FAILED",
+                "STAFF",
+                {"receipt": receipt, "error": error},
+                now,
+            )
+        result = _decode(_get_with_conn(conn, action_id))
+        result["confirmation_token"] = None
+        result["idempotent_replay"] = False
+        return result
+
+
 def get_action(action_id: str, *, include_audit: bool = True) -> dict[str, Any]:
     from . import db
 
