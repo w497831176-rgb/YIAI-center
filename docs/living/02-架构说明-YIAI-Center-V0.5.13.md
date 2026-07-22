@@ -1,9 +1,10 @@
 # YIAI Center V0.5.13 架构说明
 
-> 文档版本：V0.5.13  
-> 创建日期：2026-07-21  
-> 架构范围：工单 Tool、Action Gateway、无限轮人机共驾与 Release 快照  
-> 正式部署：`192.168.50.232:19080`
+> 文档版本：V0.5.13
+> 创建日期：2026-07-21
+> 更新日期：2026-07-22
+> 架构范围：工单 Tool、Action Gateway、无限轮人机共驾与 Release 快照
+> 正式部署：`192.168.50.112:19080`
 
 ## 1. 架构结论
 
@@ -202,8 +203,11 @@ AI_ACTIVE
 
 ## 11. 部署边界
 
-- 正式服务仍是独立容器 `yiai-center-api-1`。
-- 本轮只重建 Compose 的 `api` 服务，没有重建 MCP 或主机其他 Docker 服务。
-- 数据仍挂载到 `D:\Docker\yiai-center\data`。
-- 部署前备份为 `yiai-center-pre-v0513-20260721.sqlite`。
-- 最终镜像清单哈希：`sha256:1b7fee2337efc9a6936bf7514dc0d71310766c3ae01b89aa514634b6564802c5`。
+- 目标主机为 Ubuntu Server 24.04 LTS，YIAI Center 使用独立目录 `/home/wang/apps/yiai-center-v0513`。
+- Compose 项目名为 `yiai-center-v0513`，应用容器为 `yiai-center-v0513-api-1`，应用网络为 `yiai-center-v0513_default`。
+- 业务数据库持久化到 `/home/wang/apps/yiai-center-v0513/data/yiai-center.sqlite`，不使用主机其他项目的 Volume。
+- 应用代码固定为 Git 提交 `a50e795`，镜像名为 `yiai-center-v0513-api`。
+- 目标机 Mihomo 只监听主机回环地址，因此项目使用两个专用桥接容器和共享 Unix Socket 连接主机代理；不开放额外局域网端口，不修改 Mihomo、UFW、DNS、TUN 或现有 Docker 网络。
+- `yiai-center-v0513-proxy-host` 只负责访问主机 `127.0.0.1:7890`；`yiai-center-v0513-proxy-bridge` 只在项目网络内提供代理入口。
+- 命语 MCP 仍是独立服务，YIAI Center 只保存并调用远程 Endpoint，没有把 MCP 服务并入应用容器。
+- 源机 `192.168.50.232` 的 YIAI API 已停止，原数据库和一致性备份 `yiai-center-migration-20260722.sqlite` 保留，未执行 Compose down、Volume 删除或全局 Docker 清理。

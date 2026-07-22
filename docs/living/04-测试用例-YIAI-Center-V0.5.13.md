@@ -1,9 +1,10 @@
 # YIAI Center V0.5.13 测试用例与自测记录
 
-> 文档版本：V0.5.13  
-> 测试日期：2026-07-21  
-> 正式地址：`http://192.168.50.232:19080`  
-> 隔离验收地址：`http://192.168.50.232:19081`  
+> 文档版本：V0.5.13
+> 原版本验收日期：2026-07-21
+> 迁移复测日期：2026-07-22
+> 当前正式地址：`http://192.168.50.112:19080`
+> 原隔离验收地址：`http://192.168.50.232:19081`
 > 当前 Active Release：`V0.5.13-unlimited-codrive`
 
 ## 1. 结果说明
@@ -25,13 +26,23 @@
 - DeepSeek：未配置，用于验证确定性 Router 和模型异常降级
 - 正式 `19080` 在隔离测试期间保持运行
 
-### 正式环境
+### 当前正式环境
 
-- 容器：`yiai-center-api-1`
+- 主机：Ubuntu Server 24.04 LTS，`192.168.50.112`
+- Compose 项目：`yiai-center-v0513`
+- 应用容器：`yiai-center-v0513-api-1`
+- 应用网络：`yiai-center-v0513_default`
 - 端口：`19080`
-- 数据目录：`D:\Docker\yiai-center\data`
-- 部署前备份：`yiai-center-pre-v0513-20260721.sqlite`
-- DeepSeek：已配置，能够记录真实 Token 和人民币成本
+- 数据目录：`/home/wang/apps/yiai-center-v0513/data`
+- 代码提交：`a50e795`
+- DeepSeek：已配置；迁移复测仅执行不含业务内容的鉴权检查，返回 HTTP 200 和 2 个可用模型
+
+### 源端回滚环境
+
+- 主机：`192.168.50.232`
+- 原容器：`yiai-center-api-1`，迁移验收后已停止但未删除
+- 原数据目录：`D:\Docker\yiai-center\data`
+- 一致性备份：`yiai-center-migration-20260722.sqlite`
 
 ## 3. 自动回归
 
@@ -47,7 +58,7 @@
 
 预期：最终构建镜像内的代码和静态资源能够执行同一套测试。
 
-实际：最终镜像 `yiai-center-api` 内执行 40 项测试，耗时 7.374 秒，全部通过。测试同时兼容源码目录和镜像内 `/app/static` 布局。
+实际：原正式镜像 `yiai-center-api` 内 40 项测试全部通过；迁移后在目标镜像 `yiai-center-v0513-api` 内再次执行同一命令，共 40 项，耗时 2.461 秒，全部通过。测试同时兼容源码目录和镜像内 `/app/static` 布局。
 
 状态：通过。
 
@@ -73,7 +84,7 @@
 
 预期：重建容器前完成可恢复的数据库备份。
 
-实际：原库与 `yiai-center-pre-v0513-20260721.sqlite` 均为 2,174,976 字节。
+实际：迁移前通过 SQLite 在线备份接口生成 `yiai-center-migration-20260722.sqlite`。备份大小为 2,461,696 字节，完整性检查为 `ok`，SHA-256 为 `1d364115d403fa07d9b699eb6d21dd21e4ce2730b0b888b2f78b78449cf4d4e5`。
 
 状态：通过。
 
@@ -82,6 +93,14 @@
 预期：四个新 Release 和自测 Run 只增加记录，不减少旧数据；自测工单完成软删除后不出现在普通列表。
 
 实际：最终数量为 Release 13、Run 35、Agent 3、Skill 2、RAG 3、MCP 2、可见工单 3。旧能力数量未减少；自测工单不再出现在普通列表，Action 审计仍保留。
+
+状态：通过。
+
+### TC-0513-B04 Ubuntu 迁移与全表对账
+
+预期：目标机启动后数据库完整，全部历史数据不减少；源端只在目标验证完成后停止并保留回滚数据。
+
+实际：目标数据库完整性检查为 `ok`，迁移前后所有业务表数量逐项一致。关键数量为 Release 13、Run 35、Trace 481、Agent 3、Skill 2、RAG 3、MCP 2、Release 绑定 67、Action 4、共驾会话 4。目标健康检查、首页、两个 MCP 初始化与 Tool List、两个只读 Tool 实际调用均成功。目标验证完成后只停止源端 YIAI API，源数据库、容器和一致性备份均保留。
 
 状态：通过。
 
@@ -286,7 +305,7 @@ Router 真实用量：缓存未命中输入 266、缓存命中输入 0、输出 
 
 预期：正式首页能够加载。
 
-实际：`GET /` 返回 HTTP 200，内容类型为 `text/html; charset=utf-8`；`GET /api/health` 返回 `status=ok`、`version=V0.5.13`、`database=ok`、`deepseek_configured=true`。
+实际：从当前电脑访问 `http://192.168.50.112:19080/` 返回 HTTP 200；`GET /api/health` 返回 `status=ok`、`version=V0.5.13`、`database=ok`、`deepseek_configured=true`。三个项目容器均为 `healthy`。
 
 状态：通过。
 
@@ -300,4 +319,4 @@ Router 真实用量：缓存未命中输入 266、缓存命中输入 0、输出 
 
 ## 11. 最终结论
 
-V0.5.10—V0.5.13 的后端、Release、真实业务数据、正式 DeepSeek 调用、成本、共驾循环和部署链路均通过。唯一保留项是产品负责人之后对页面视觉密度与操作手感的主观走查；它不影响当前正式环境的业务可用性和证据完整性。
+V0.5.10—V0.5.13 的后端、Release、真实业务数据、正式 DeepSeek 调用、成本、共驾循环、Ubuntu 迁移和部署链路均通过。迁移后测试仍为 40/40，Active Release 仍为 `V0.5.13-unlimited-codrive`，迁移前后数据无减少。唯一保留项是产品负责人之后对页面视觉密度与操作手感的主观走查；它不影响当前正式环境的业务可用性和证据完整性。
