@@ -674,6 +674,20 @@ class YIAIHandler(BaseHTTPRequestHandler):
                 "content": answer,
             },
         )
+        evaluation = db.save_run_evaluation(run["run_id"])
+        db.append_trace(
+            run["run_id"],
+            run["release_id"],
+            "evaluation_completed",
+            {
+                "evaluation_id": evaluation["id"],
+                "status": evaluation["status"],
+                "score": evaluation["score"],
+                "checks": evaluation["checks"],
+                "badcase_codes": evaluation["badcase_codes"],
+                "scope": "CURRENT_RUN_ONLY",
+            },
+        )
         done = {
             "run_id": run["run_id"],
             "status": "DONE",
@@ -687,6 +701,11 @@ class YIAIHandler(BaseHTTPRequestHandler):
             "display_currency": "CNY",
             "action_id": action_id,
             "action_status": action["status"],
+            "evaluation": {
+                "status": evaluation["status"],
+                "score": evaluation["score"],
+                "badcase_codes": evaluation["badcase_codes"],
+            },
         }
         db.append_trace(run["run_id"], run["release_id"], "done", done)
         return {"action": action, "run": done, "message": answer}

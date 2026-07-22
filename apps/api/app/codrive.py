@@ -448,6 +448,8 @@ def is_human_output_state(conversation_id: str | None) -> bool:
 
 def is_handoff_request(content: str) -> bool:
     normalized = content.replace(" ", "")
+    if is_handoff_opt_out(normalized):
+        return False
     terms = (
         "我要人工",
         "转人工",
@@ -458,3 +460,58 @@ def is_handoff_request(content: str) -> bool:
     )
     return any(term in normalized for term in terms)
 
+
+def is_handoff_opt_out(content: str) -> bool:
+    normalized = content.replace(" ", "")
+    return any(
+        term in normalized
+        for term in (
+            "不要转人工",
+            "暂时不要转人工",
+            "无需转人工",
+            "不用转人工",
+            "不要人工客服",
+            "先别转人工",
+        )
+    )
+
+
+def assess_ai_handoff(content: str) -> dict[str, Any]:
+    """Deterministic safety policy for a real, explainable AI handoff decision."""
+    normalized = content.replace(" ", "")
+    opted_out = is_handoff_opt_out(normalized)
+    repeated_terms = (
+        "连续三次",
+        "连续处理三次",
+        "多次失败",
+        "反复失败",
+        "一直失败",
+        "仍未解决",
+    )
+    risk_terms = ("造成损失", "继续损失", "资金风险", "安全风险", "人身安全", "数据丢失")
+    urgency_terms = ("非常着急", "立即升级", "马上处理", "紧急")
+    repeated = [term for term in repeated_terms if term in normalized]
+    risks = [term for term in risk_terms if term in normalized]
+    urgency = [term for term in urgency_terms if term in normalized]
+    should_handoff = not opted_out and bool(repeated) and bool(risks or urgency)
+    if opted_out:
+        reason = "用户明确要求本轮暂不转人工，AI 继续提供可执行建议"
+        rule_code = "USER_OPT_OUT"
+    elif should_handoff:
+        reason = "检测到重复处理失败，并伴随潜在损失或紧急升级信号"
+        rule_code = "REPEATED_FAILURE_WITH_HIGH_RISK"
+    else:
+        reason = "未同时满足重复失败与高风险升级条件"
+        rule_code = "NO_HANDOFF_REQUIRED"
+    return {
+        "should_handoff": should_handoff,
+        "source": "AI_POLICY",
+        "rule_code": rule_code,
+        "reason": reason,
+        "signals": {
+            "repeated_failure": repeated,
+            "risk": risks,
+            "urgency": urgency,
+            "user_opt_out": opted_out,
+        },
+    }

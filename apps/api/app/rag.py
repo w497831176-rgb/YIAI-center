@@ -546,12 +546,17 @@ def prompt_context(result: dict[str, Any]) -> str:
 
 def sanitize_citations(answer: str, allowed: list[str]) -> tuple[str, list[str], list[str]]:
     allowed_set = set(allowed)
-    found = re.findall(r"\[RAG:[^\]]+\]", answer)
+    normalized = re.sub(
+        r"[\[\(（](RAG:[^\]\)）]+)[\]\)）]",
+        lambda match: f"[{match.group(1)}]",
+        answer,
+    )
+    found = re.findall(r"\[RAG:[^\]]+\]", normalized)
     removed = [item for item in found if item not in allowed_set]
     sanitized = re.sub(
         r"\[RAG:[^\]]+\]",
         lambda match: match.group(0) if match.group(0) in allowed_set else "",
-        answer,
+        normalized,
     )
     used = list(dict.fromkeys(item for item in found if item in allowed_set))
     return sanitized, used, list(dict.fromkeys(removed))

@@ -319,7 +319,15 @@ def _priority(value: str) -> str:
 
 def plan_write(content: str, allowed_tool_ids: set[str]) -> dict[str, Any] | None:
     work_order_id = _work_order_id(content)
-    if "创建" in content and "工单" in content and "create_work_order" in allowed_tool_ids:
+    def negated(verb: str) -> bool:
+        return bool(
+            re.search(
+                rf"(?:不要|无需|不需要|不必|暂不|禁止)[^。！？；，]{{0,8}}{re.escape(verb)}",
+                content,
+            )
+        )
+
+    if "创建" in content and "工单" in content and not negated("创建") and "create_work_order" in allowed_tool_ids:
         payload = {
             "subject": _label_value(content, ("主题", "标题")),
             "description": _label_value(content, ("描述", "问题")),
@@ -328,7 +336,7 @@ def plan_write(content: str, allowed_tool_ids: set[str]) -> dict[str, Any] | Non
         }
         missing = [key for key, value in payload.items() if not value]
         return {"tool_id": "create_work_order", "payload": payload, "missing_fields": missing}
-    if "更新" in content and "工单" in content and "update_work_order" in allowed_tool_ids:
+    if "更新" in content and "工单" in content and not negated("更新") and "update_work_order" in allowed_tool_ids:
         changes: dict[str, Any] = {}
         for field, labels in (
             ("subject", ("主题", "标题")),
@@ -352,7 +360,7 @@ def plan_write(content: str, allowed_tool_ids: set[str]) -> dict[str, Any] | Non
             "payload": {"work_order_id": work_order_id or "", "changes": changes},
             "missing_fields": missing,
         }
-    if "关闭" in content and "工单" in content and "close_work_order" in allowed_tool_ids:
+    if "关闭" in content and "工单" in content and not negated("关闭") and "close_work_order" in allowed_tool_ids:
         result = _label_value(content, ("处理结果", "结果", "说明"))
         missing = []
         if not work_order_id:
@@ -364,7 +372,7 @@ def plan_write(content: str, allowed_tool_ids: set[str]) -> dict[str, Any] | Non
             "payload": {"work_order_id": work_order_id or "", "result": result},
             "missing_fields": missing,
         }
-    if "删除" in content and "工单" in content and "delete_work_order" in allowed_tool_ids:
+    if "删除" in content and "工单" in content and not negated("删除") and "delete_work_order" in allowed_tool_ids:
         return {
             "tool_id": "delete_work_order",
             "payload": {"work_order_id": work_order_id or ""},
@@ -501,4 +509,3 @@ def format_read_answer(result: dict[str, Any]) -> str:
         for item in orders
     )
     return "\n".join(lines)
-

@@ -114,6 +114,69 @@ def released_skills(config: dict[str, Any], agent_id: str) -> list[dict[str, Any
     ]
 
 
+def select_released_skills(
+    config: dict[str, Any], agent_id: str, content: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    selected = []
+    decisions = []
+    content_terms = _route_terms(content)
+    for skill in released_skills(config, agent_id):
+        positive_profile = " ".join(
+            str(skill.get(key, ""))
+            for key in ("name", "description", "applicability", "content", "output_requirements")
+        )
+        negative_profile = str(skill.get("non_applicability", ""))
+        positive_score = len(content_terms & _route_terms(positive_profile))
+        negative_score = len(content_terms & _route_terms(negative_profile))
+        activated = positive_score > 0 and negative_score == 0
+        decisions.append(
+            {
+                "skill_id": skill["skill_id"],
+                "skill_version_id": skill["skill_version_id"],
+                "name": skill["name"],
+                "positive_match_score": positive_score,
+                "negative_match_score": negative_score,
+                "activated": activated,
+                "reason": "用户请求命中适用条件且未命中不适用条件"
+                if activated
+                else "本次请求未满足该 Skill 的适用条件",
+            }
+        )
+        if activated:
+            selected.append(skill)
+    return selected, decisions
+
+
+def is_ambiguous_request(content: str) -> bool:
+    normalized = re.sub(r"[\s，。！？、,.!?]", "", content)
+    vague_phrases = (
+        "帮我处理一下",
+        "帮我弄一下",
+        "尽快处理",
+        "越快越好",
+        "帮我看一下",
+    )
+    concrete_markers = (
+        "工单",
+        "投诉",
+        "查询",
+        "创建",
+        "更新",
+        "关闭",
+        "删除",
+        "MCP",
+        "Streamable",
+        "故障",
+        "损失",
+        "规则",
+    )
+    return (
+        any(phrase in normalized for phrase in vague_phrases)
+        and not any(marker.lower() in normalized.lower() for marker in concrete_markers)
+        and len(normalized) <= 24
+    )
+
+
 def skill_prompt(skills: list[dict[str, Any]]) -> str:
     if not skills:
         return ""
@@ -131,6 +194,23 @@ def skill_prompt(skills: list[dict[str, Any]]) -> str:
             )
         )
     return "\n\n以下是本 Release 已发布并绑定到你的自然语言 Skill，必须遵循：\n" + "\n\n".join(blocks)
+
+
+def _evaluate_and_trace(run: dict[str, Any]) -> dict[str, Any]:
+    evaluation = db.save_run_evaluation(run["run_id"])
+    trace(
+        run,
+        "evaluation_completed",
+        {
+            "evaluation_id": evaluation["id"],
+            "status": evaluation["status"],
+            "score": evaluation["score"],
+            "checks": evaluation["checks"],
+            "badcase_codes": evaluation["badcase_codes"],
+            "scope": "CURRENT_RUN_ONLY",
+        },
+    )
+    return evaluation
 
 
 def _finish_deterministic(
@@ -161,6 +241,7 @@ def _finish_deterministic(
             "content": answer,
         },
     )
+    evaluation = _evaluate_and_trace(run)
     payload = {
         "run_id": run["run_id"],
         "status": "DONE",
@@ -172,6 +253,11 @@ def _finish_deterministic(
         "estimated_cost": result["estimated_cost"],
         "estimated_cost_cny": result["estimated_cost_cny"],
         "display_currency": "CNY",
+        "evaluation": {
+            "status": evaluation["status"],
+            "score": evaluation["score"],
+            "badcase_codes": evaluation["badcase_codes"],
+        },
         **(extra or {}),
     }
     trace(run, "done", payload)
@@ -249,49 +335,6 @@ def execute_chat(
             "release_version": run["release_version"],
         },
     )
-
-    if not resume_from_human and codrive.is_handoff_request(content):
-        agent = next(
-            (
-                item
-                for item in run["release_config"].get("agents", [])
-                if item.get("id") == "general-service"
-            ),
-            run["release_config"]["agents"][0],
-        )
-        trace(
-            run,
-            "agent_selected",
-            {"agent_id": agent["id"], "agent_name": agent["name"], "source": "handoff_rule"},
-        )
-        session = codrive.request_human(
-            run["conversation_id"],
-            actor="USER",
-            reason=content,
-            summary="用户主动请求员工协助；请先阅读本会话完整消息和最近 Run 证据。",
-        )
-        trace(
-            run,
-            "codrive_handoff_requested",
-            {
-                "conversation_id": run["conversation_id"],
-                "state": session["state"],
-                "version": session["version"],
-                "ai_standby": True,
-            },
-        )
-        answer = (
-            "已发起人机共驾，员工可以在员工工作台查看完整对话和交接信息。"
-            "AI 会始终保持待命；在员工点击“交还 AI”前，AI 不会与员工并发回复。"
-        )
-        yield sse("agent_selected", {"agent_id": agent["id"], "agent_name": agent["name"]})
-        yield sse("codrive", session)
-        yield sse("delta", {"content": answer})
-        done = _finish_deterministic(
-            run, agent, answer, started, extra={"codrive": session}
-        )
-        yield sse("done", done)
-        return
 
     if not resume_from_human and codrive.is_human_output_state(run["conversation_id"]):
         state = codrive.get_session(run["conversation_id"], include_events=False)
@@ -465,8 +508,120 @@ def execute_chat(
     trace(
         run,
         "agent_selected",
-        {"agent_id": agent["id"], "agent_name": agent["name"]},
+        {
+            "agent_id": agent["id"],
+            "agent_name": agent["name"],
+            "route_source": route.get("source"),
+            "route_reason": route.get("reason"),
+        },
     )
+
+    if not resume_from_human and is_ambiguous_request(content):
+        route["confidence"] = min(float(route.get("confidence", 0)), 0.45)
+        route["needs_clarification"] = True
+        route["reason"] = "请求缺少处理对象、问题事实和期望结果，无法可靠选择具体执行能力"
+        candidate = db.record_badcase_candidate(
+            run["run_id"],
+            "ROUTER_LOW_CONFIDENCE",
+            {
+                "content": content,
+                "confidence": route["confidence"],
+                "reason": route["reason"],
+                "selected_agent_id": agent["id"],
+            },
+        )
+        trace(run, "route_decision", route)
+        trace(
+            run,
+            "badcase_detected",
+            {
+                "candidate_id": candidate["id"],
+                "rule_code": candidate["rule_code"],
+                "status": candidate["status"],
+                "evidence": candidate["evidence"],
+                "scope": "CURRENT_RUN_ONLY",
+            },
+        )
+        answer = (
+            "可以帮你处理，但目前还缺少必要信息。请一次性告诉我："
+            "要处理的对象、具体问题、已经发生了什么，以及你希望得到的结果。"
+        )
+        yield sse("route_decision", route)
+        yield sse("agent_selected", {"agent_id": agent["id"], "agent_name": agent["name"]})
+        yield sse("delta", {"content": answer})
+        done = _finish_deterministic(
+            run,
+            agent,
+            answer,
+            started,
+            extra={"clarification_required": True, "badcase": candidate},
+        )
+        yield sse("done", done)
+        return
+
+    explicit_handoff = not resume_from_human and codrive.is_handoff_request(content)
+    ai_handoff = codrive.assess_ai_handoff(content)
+    trace(
+        run,
+        "codrive_policy_evaluated",
+        {
+            **ai_handoff,
+            "explicit_user_request": explicit_handoff,
+            "selected_agent_id": agent["id"],
+        },
+    )
+    if not resume_from_human and (explicit_handoff or ai_handoff["should_handoff"]):
+        source = "USER_EXPLICIT" if explicit_handoff else "AI_POLICY"
+        reason = content if explicit_handoff else ai_handoff["reason"]
+        actor = "USER" if explicit_handoff else "AI"
+        session = codrive.request_human(
+            run["conversation_id"],
+            actor=actor,
+            reason=reason,
+            summary=(
+                "用户主动要求员工承接；请阅读完整会话、最近 Run 和未完成操作。"
+                if explicit_handoff
+                else "AI 根据重复失败与高风险信号发起升级；请核对风险、影响和既往处理记录。"
+            ),
+        )
+        trace(
+            run,
+            "codrive_handoff_requested",
+            {
+                "conversation_id": run["conversation_id"],
+                "state": session["state"],
+                "version": session["version"],
+                "ai_standby": True,
+                "source": source,
+                "reason": reason,
+                "rule_code": ai_handoff["rule_code"] if not explicit_handoff else "USER_EXPLICIT_REQUEST",
+                "signals": ai_handoff["signals"],
+                "agent_id": agent["id"],
+            },
+        )
+        answer = (
+            "已按你的明确要求发起人机共驾。员工可在员工工作台查看完整对话和交接信息。"
+            if explicit_handoff
+            else "我判断本问题已出现重复失败，并伴随潜在损失或紧急升级信号，已发起人机共驾。"
+        ) + "AI 会始终保持待命；员工点击“交还 AI”后，我会继续承接，而不是结束会话。"
+        yield sse("route_decision", route)
+        yield sse("agent_selected", {"agent_id": agent["id"], "agent_name": agent["name"]})
+        yield sse("codrive", session)
+        yield sse("delta", {"content": answer})
+        done = _finish_deterministic(
+            run,
+            agent,
+            answer,
+            started,
+            extra={
+                "codrive": session,
+                "handoff_source": source,
+                "handoff_rule": ai_handoff["rule_code"] if not explicit_handoff else "USER_EXPLICIT_REQUEST",
+            },
+        )
+        yield sse("done", done)
+        return
+
     released_tool_ids = work_orders.tool_ids_for_agent(
         run["release_config"], agent["id"]
     )
@@ -603,6 +758,14 @@ def execute_chat(
                 + json.dumps(preset_read_result, ensure_ascii=False)
             )
         except Exception as exc:
+            candidate = db.record_badcase_candidate(
+                run["run_id"],
+                "PRESET_TOOL_CALL_FAILED",
+                {
+                    "tool_name": read_plan["tool_id"],
+                    "error": f"{type(exc).__name__}: {str(exc)}"[:1000],
+                },
+            )
             trace(
                 run,
                 "preset_tool_response",
@@ -613,6 +776,17 @@ def execute_chat(
                     "latency_ms": round((time.perf_counter() - tool_started) * 1000),
                     "finished_at": db.now_iso(),
                     "model_api_cost": 0,
+                },
+            )
+            trace(
+                run,
+                "badcase_detected",
+                {
+                    "candidate_id": candidate["id"],
+                    "rule_code": candidate["rule_code"],
+                    "status": candidate["status"],
+                    "evidence": candidate["evidence"],
+                    "scope": "CURRENT_RUN_ONLY",
                 },
             )
             preset_context = "\n\n预置工单 Tool 调用失败。必须明确说明暂时无法取得工单事实，不得编造。"
@@ -664,6 +838,7 @@ def execute_chat(
                     "content": clarification,
                 },
             )
+            evaluation = _evaluate_and_trace(run)
             done_payload = {
                 "run_id": run["run_id"], "status": "DONE", "agent_id": agent["id"],
                 "agent_name": agent["name"], "release_id": run["release_id"],
@@ -672,6 +847,11 @@ def execute_chat(
                 "estimated_cost_cny": result["estimated_cost_cny"],
                 "display_currency": "CNY", "clarification_required": True,
                 "missing_fields": mcp_preflight["missing_fields"],
+                "evaluation": {
+                    "status": evaluation["status"],
+                    "score": evaluation["score"],
+                    "badcase_codes": evaluation["badcase_codes"],
+                },
             }
             trace(run, "done", done_payload)
             yield sse("done", done_payload)
@@ -722,6 +902,15 @@ def execute_chat(
                 )
                 mcp_context = mcp_runtime.prompt_context(mcp_snap, server)
             except Exception as exc:
+                candidate = db.record_badcase_candidate(
+                    run["run_id"],
+                    "MCP_CALL_FAILED",
+                    {
+                        "server_id": server["server_id"],
+                        "tool_name": mcp_preflight["tool_name"],
+                        "error": f"{type(exc).__name__}: {str(exc)}"[:1000],
+                    },
+                )
                 trace(
                     run,
                     "mcp_response",
@@ -732,20 +921,38 @@ def execute_chat(
                         "release_id": run["release_id"],
                     },
                 )
+                trace(
+                    run,
+                    "badcase_detected",
+                    {
+                        "candidate_id": candidate["id"],
+                        "rule_code": candidate["rule_code"],
+                        "status": candidate["status"],
+                        "evidence": candidate["evidence"],
+                        "scope": "CURRENT_RUN_ONLY",
+                    },
+                )
                 mcp_context = (
                     "\n\nThe selected remote read-only Tool failed. State that the requested live data "
                     "is temporarily unavailable and do not fabricate a result."
                 )
-    skills = released_skills(run["release_config"], agent["id"])
+    skills, skill_decisions = select_released_skills(
+        run["release_config"], agent["id"], content
+    )
     trace(
         run,
         "skill_considered",
         {
             "agent_id": agent["id"],
-            "published_binding_count": len(skills),
+            "published_binding_count": len(skill_decisions),
+            "activated_count": len(skills),
             "skill_version_ids": [skill["skill_version_id"] for skill in skills],
+            "decisions": skill_decisions,
         },
     )
+    for decision in skill_decisions:
+        if not decision["activated"]:
+            trace(run, "skill_skipped", decision)
     for skill in skills:
         trace(
             run,
@@ -858,6 +1065,23 @@ def execute_chat(
                 "removed_unknown_citations": removed_citations,
             },
         )
+        if removed_citations:
+            candidate = db.record_badcase_candidate(
+                run["run_id"],
+                "RAG_UNKNOWN_CITATION_REMOVED",
+                {"removed_unknown_citations": removed_citations},
+            )
+            trace(
+                run,
+                "badcase_detected",
+                {
+                    "candidate_id": candidate["id"],
+                    "rule_code": candidate["rule_code"],
+                    "status": candidate["status"],
+                    "evidence": candidate["evidence"],
+                    "scope": "CURRENT_RUN_ONLY",
+                },
+            )
         for index in range(0, len(answer), 96):
             yield sse("delta", {"content": answer[index : index + 96]})
         latency_ms = round((time.perf_counter() - started) * 1000)
@@ -880,6 +1104,7 @@ def execute_chat(
                 "content": answer,
             },
         )
+        evaluation = _evaluate_and_trace(run)
         done_payload = {
             "run_id": run["run_id"],
             "status": "DONE",
@@ -891,6 +1116,11 @@ def execute_chat(
             "estimated_cost": result["estimated_cost"],
             "estimated_cost_cny": result["estimated_cost_cny"],
             "display_currency": "CNY",
+            "evaluation": {
+                "status": evaluation["status"],
+                "score": evaluation["score"],
+                "badcase_codes": evaluation["badcase_codes"],
+            },
             "usage": {
                 "prompt_cache_miss_tokens": final_snap.get(
                     "prompt_cache_miss_tokens"
@@ -957,6 +1187,7 @@ def execute_chat(
         error_code = type(exc).__name__
         db.fail_run(run["run_id"], error_code)
         trace(run, "error", {"error_code": error_code})
+        _evaluate_and_trace(run)
         yield sse(
             "error",
             {

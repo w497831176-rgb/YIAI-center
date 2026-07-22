@@ -1,5 +1,7 @@
 const state = {
   tab: "user",
+  userSection: "chat",
+  employeeSection: "handoff",
   platformSection: "agents",
   workspace: null,
   messages: [],
@@ -43,6 +45,7 @@ const state = {
   runs: [],
   selectedRun: null,
   drawerRun: null,
+  citationOpen: null,
   notice: "",
 };
 
@@ -145,14 +148,19 @@ function workOrderStatus(value) {
   return ({ OPEN: "待处理", IN_PROGRESS: "处理中", CLOSED: "已关闭" })[value] || value;
 }
 
-function workOrderCard(order, employee = false) {
-  return `<article class="work-order-card">
-    <div class="management-card-top">${cardIcon("W", order.status === "CLOSED" ? "green" : "amber")}<span class="status ${order.status === "CLOSED" ? "done" : "running"}">${escapeHtml(workOrderStatus(order.status))}</span></div>
-    <div class="management-card-title"><h3>${escapeHtml(order.subject)}</h3><small>${escapeHtml(order.id)}</small></div>
-    <p>${escapeHtml(order.description)}</p>
-    <div class="management-card-meta"><span>类别 / 优先级</span><strong>${escapeHtml(order.category)} / ${escapeHtml(order.priority)}</strong><span>处理结果</span><strong>${escapeHtml(order.result || "暂无")}</strong><span>更新时间</span><strong>${formatTime(order.updated_at)}</strong></div>
-    ${employee && order.status !== "CLOSED" ? `<div class="card-actions"><button class="secondary" data-work-order-action="update" data-work-order-id="${escapeHtml(order.id)}">更新草稿</button><button class="secondary" data-work-order-action="close" data-work-order-id="${escapeHtml(order.id)}">关闭草稿</button><button class="danger" data-work-order-action="delete" data-work-order-id="${escapeHtml(order.id)}">删除草稿</button></div>` : ""}
-  </article>`;
+function workOrderTable(orders, employee = false) {
+  if (!orders.length) return `<div class="run-empty">当前没有可见工单。</div>`;
+  return `<div class="table-shell"><table class="data-table work-order-table">
+    <thead><tr><th>工单</th><th>状态</th><th>类别 / 优先级</th><th>当前说明</th><th>更新时间</th>${employee ? "<th>操作</th>" : ""}</tr></thead>
+    <tbody>${orders.map((order) => `<tr>
+      <td><strong>${escapeHtml(order.subject)}</strong><small>${escapeHtml(order.id)}</small></td>
+      <td><span class="status ${order.status === "CLOSED" ? "done" : "running"}">${escapeHtml(workOrderStatus(order.status))}</span></td>
+      <td>${escapeHtml(order.category)}<small>${escapeHtml(order.priority)}</small></td>
+      <td><span class="cell-clamp">${escapeHtml(order.result || order.description || "暂无")}</span></td>
+      <td>${formatTime(order.updated_at)}</td>
+      ${employee ? `<td><div class="row-actions">${order.status !== "CLOSED" ? `<button class="secondary" data-work-order-action="update" data-work-order-id="${escapeHtml(order.id)}">更新</button><button class="secondary" data-work-order-action="close" data-work-order-id="${escapeHtml(order.id)}">关闭</button>` : ""}<button class="danger-button" data-work-order-action="delete" data-work-order-id="${escapeHtml(order.id)}">删除</button></div></td>` : ""}
+    </tr>`).join("")}</tbody>
+  </table></div>`;
 }
 
 function actionCard(action) {
@@ -211,6 +219,7 @@ function shell(content) {
       </nav>
       <main>${content}</main>
       ${state.drawerRun ? runDrawer(state.drawerRun) : ""}
+      ${citationDialog()}
     </div>`;
 }
 
@@ -240,25 +249,75 @@ function conversationList() {
   </aside>`;
 }
 
+function citationTags(message) {
+  const citations = message.capability_summary?.rag?.citations || [];
+  if (!citations.length) return "";
+  return `<div class="citation-tags" aria-label="本回答引用的知识切片">
+    ${citations.map((item) => `<button type="button" data-citation-run-id="${escapeHtml(message.run_id)}" data-citation-chunk-id="${escapeHtml(item.chunk_id)}" title="打开引用切片：${escapeHtml(item.heading || item.chunk_id)}">${escapeHtml(item.citation)}</button>`).join("")}
+  </div>`;
+}
+
+function hitChip(tone, label, value, title = "") {
+  if (value == null || value === "") return "";
+  const full = `${label}：${value}`;
+  return `<span class="hit-chip ${escapeHtml(tone)}" title="${escapeHtml(title || full)}"><b>${escapeHtml(label)}</b>${escapeHtml(value)}</span>`;
+}
+
+function capabilityHitStrip(message) {
+  const summary = message.capability_summary;
+  if (!summary) return "";
+  const route = summary.route || {};
+  const usage = summary.usage || {};
+  const skills = summary.skills || [];
+  const ragDocuments = summary.rag?.documents || [];
+  const mcpCalls = summary.mcp_calls || [];
+  const presetTools = summary.preset_tools || [];
+  const badcases = summary.badcases || [];
+  const evaluation = summary.evaluation;
+  const chips = [
+    hitChip("agent", "Agent", summary.agent?.name || message.agent_name || message.agent_id),
+    hitChip("route", "Router", shortText(route.reason || "已选择唯一垂直 Agent", 46), route.reason),
+    ...skills.map((item) => hitChip("skill", "Skill", item.name)),
+    ...ragDocuments.map((item) => hitChip("rag", "RAG", item.document_name || item.document_id)),
+    ...mcpCalls.map((item) => hitChip("mcp", "MCP", `${item.server_name || item.server_id} / ${item.tool_name} · ${item.status}`)),
+    ...presetTools.map((item) => hitChip("tool", "Tool", `${item.tool_name} · ${item.status || "已调用"}`)),
+    summary.codrive?.triggered ? hitChip("human", "人机协同", `${summary.codrive.source} · ${shortText(summary.codrive.reason, 30)}`, summary.codrive.reason) : "",
+    ...badcases.map((item) => hitChip("badcase", "Badcase", `${item.rule_code} · ${item.status}`)),
+    evaluation ? hitChip(evaluation.status === "PASS" ? "evaluation-pass" : "evaluation-warn", "Evaluation", `${evaluation.status} / ${evaluation.score}`) : "",
+    hitChip("token-miss", "未命中输入", String(usage.prompt_cache_miss_tokens ?? 0)),
+    hitChip("token-hit", "缓存输入", String(usage.prompt_cache_hit_tokens ?? 0)),
+    hitChip("token-output", "输出", String(usage.completion_tokens ?? 0)),
+    hitChip("cost", "成本", formatCny(summary.estimated_cost_cny)),
+    hitChip("release", "Release", message.release_version),
+  ].filter(Boolean);
+  return `<div class="capability-hit-strip" aria-label="本次回答实际命中的 AI 技术栈">${chips.join("")}</div>`;
+}
+
+function citationDialog() {
+  const item = state.citationOpen;
+  if (!item) return "";
+  return editorDialog(
+    `RAG 引用切片 · ${item.document_name || item.document_id}`,
+    `${item.citation} · ${item.chunk_id} · 不可变版本 ${item.rag_version_id || "—"}`,
+    `<section class="citation-detail"><div class="trace-summary">${fact("切片标题", item.heading || "未命名切片")}${fact("混合检索分数", item.hybrid_score ?? "—")}${fact("内容哈希", item.content_hash || "—")}</div><pre>${escapeHtml(item.content || "该历史 Run 未保存切片正文。")}</pre></section>`,
+    "close-citation",
+    true,
+  );
+}
+
 function messageMeta(message) {
   const timestamp = `<time>${formatTime(message.created_at)}</time>`;
   if (message.role !== "assistant") {
     return `<div class="bubble-meta">${timestamp}</div>`;
   }
   const runId = message.run_id;
-  const agent = message.agent_id
-    ? `<span>垂直 Agent：${escapeHtml(agentName(message.agent_id, message.agent_name))}</span>`
-    : "";
-  const release = message.release_version
-    ? `<span>Release：${escapeHtml(message.release_version)}</span>`
-    : "";
   const status = message.run_status
     ? `<span class="status ${message.run_status.toLowerCase()}">${escapeHtml(message.run_status)}</span>`
     : "";
   const detail = runId
     ? `<button class="run-detail-link" data-message-run-id="${escapeHtml(runId)}">查看 Run 详情 →</button>`
     : "";
-  return `<div class="bubble-meta">${timestamp}${status}${agent}${release}${detail}</div>`;
+  return `<div class="bubble-meta">${timestamp}${status}${detail}</div>`;
 }
 
 function messageList() {
@@ -283,6 +342,8 @@ function messageList() {
         <span class="message-role">${message.role === "user" ? "你" : "AI"}</span>
         <div class="message-body">
           <p>${escapeHtml(message.content || (state.sending ? "正在生成回答…" : ""))}</p>
+          ${message.role === "assistant" ? citationTags(message) : ""}
+          ${message.role === "assistant" ? capabilityHitStrip(message) : ""}
           ${messageMeta(message)}
         </div>
       </article>`,
@@ -290,88 +351,78 @@ function messageList() {
     .join("");
 }
 
+function roleSubnav(role) {
+  const items = role === "user"
+    ? [["chat", "AI 对话"], ["workorders", "我的工单"]]
+    : [["handoff", "人工接管"], ["workorders", "我的工单"]];
+  const current = role === "user" ? state.userSection : state.employeeSection;
+  return `<nav class="secondary-nav" aria-label="${role === "user" ? "用户" : "员工"}二级菜单">${items.map(([key, label]) => `<button data-${role}-section="${key}" class="${current === key ? "active" : ""}">${label}</button>`).join("")}</nav>`;
+}
+
 function userPage() {
-  return `<section class="chat-layout">
-    ${conversationList()}
-    <div class="chat-panel">
-      <div class="section-heading">
-        <div>
-          <span class="eyebrow">USER EXPERIENCE</span>
-          <h1>今天想处理什么？</h1>
-          <p>每条用户请求创建一个 Run；Router 每次只选择一个垂直 Agent。</p>
+  if (state.userSection === "workorders") {
+    return `<section class="role-workspace">${roleSubnav("user")}${panelHeading("MY WORK ORDERS", "我的工单", "以列表查看当前用户可见的真实工单记录。")}${workOrderTable(state.userWorkOrders)}</section>`;
+  }
+  return `<section class="role-workspace">
+    ${roleSubnav("user")}
+    <section class="chat-layout">
+      ${conversationList()}
+      <div class="chat-panel">
+        <div class="section-heading">
+          <div><span class="eyebrow">AI CONVERSATION</span><h1>今天想处理什么？</h1><p>每条消息固定一个 Release，经 Router 只选择一个垂直 Agent。</p></div>
+          <button class="ghost-button" data-action="new-conversation">新对话</button>
         </div>
-        <button class="ghost-button" data-action="new-conversation">新对话</button>
+        ${codriveBanner()}
+        <div class="message-list">${messageList()}</div>
+        ${state.actions.length ? `<section class="inline-business-section"><div class="subsection-heading"><div><span class="eyebrow">CONFIRM BEFORE WRITE</span><h2>待确认操作</h2></div></div><div class="business-grid">${state.actions.map(actionCard).join("")}</div></section>` : ""}
+        <form class="composer" id="chat-form"><textarea id="chat-input" placeholder="输入你的问题…" rows="2" ${state.sending ? "disabled" : ""}></textarea><button ${state.sending ? "disabled" : ""}>${state.sending ? "运行中" : "发送"}</button></form>
+        <p class="privacy-note">隐藏思考内容不展示、不保存；气泡摘要和 Run 详情只显示可核对的运行事实。</p>
       </div>
-      ${codriveBanner()}
-      <div class="message-list">${messageList()}</div>
-      ${state.actions.length ? `<section class="inline-business-section"><div class="subsection-heading"><div><span class="eyebrow">CONFIRM BEFORE WRITE</span><h2>待确认操作</h2></div></div><div class="business-grid">${state.actions.map(actionCard).join("")}</div></section>` : ""}
-      <form class="composer" id="chat-form">
-        <textarea id="chat-input" placeholder="输入你的问题…" rows="2" ${
-          state.sending ? "disabled" : ""
-        }></textarea>
-        <button ${state.sending ? "disabled" : ""}>${state.sending ? "运行中" : "发送"}</button>
-      </form>
-      <p class="privacy-note">隐藏思考内容不展示、不保存；Run 详情只展示可核对的输入、输出和运行事实。</p>
-      <section class="inline-business-section"><div class="subsection-heading"><div><span class="eyebrow">MY WORK ORDERS</span><h2>我的工单</h2><p>固定演示用户仅查看自己的未删除工单。</p></div></div><div class="business-grid">${state.userWorkOrders.length ? state.userWorkOrders.map((item) => workOrderCard(item)).join("") : `<div class="run-empty">当前没有可见工单。</div>`}</div></section>
-    </div>
+    </section>
   </section>`;
+}
+
+function codriveTable() {
+  if (!state.codriveSessions.length) return `<div class="run-empty">当前没有人机共驾记录。</div>`;
+  return `<div class="table-shell"><table class="data-table"><thead><tr><th>会话</th><th>状态</th><th>请求原因</th><th>最近 Agent</th><th>员工消息</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${state.codriveSessions.map((session) => `<tr>
+    <td><strong>${escapeHtml(shortText(session.title || "未命名对话", 42))}</strong><small>${escapeHtml(session.conversation_id)}</small></td>
+    <td><span class="status ${session.state.toLowerCase()}">${escapeHtml(session.state)}</span></td>
+    <td><span class="cell-clamp">${escapeHtml(session.request_reason || "AI 已承接并持续待命")}</span></td>
+    <td>${escapeHtml(agentName(session.last_agent_id))}</td><td>${session.staff_message_count || 0} 条</td><td>${formatTime(session.updated_at)}</td>
+    <td><div class="row-actions"><button class="secondary" data-codrive-open="${escapeHtml(session.conversation_id)}">交接包</button>${session.state === "HANDOFF_REQUESTED" ? `<button data-codrive-accept="${escapeHtml(session.conversation_id)}" data-codrive-version="${session.version}">接受</button>` : ""}</div></td>
+  </tr>`).join("")}</tbody></table></div>`;
 }
 
 function employeePage() {
   const selected = state.selectedCodrive;
-  return `<section class="employee-workspace">
-    ${panelHeading("HUMAN + AI CO-DRIVING", "员工工作台", "员工可持续多轮回复；点击“交还 AI”后 AI 恢复承接，但会话不会完结。")}
+  if (state.employeeSection === "workorders") {
+    return `<section class="role-workspace">${roleSubnav("employee")}${panelHeading("EMPLOYEE WORK ORDERS", "我的工单", "以列表查看和发起工单操作；写操作仍需统一确认。")}${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}${workOrderTable(state.employeeWorkOrders, true)}${state.employeeActions.length ? `<section class="employee-section"><div class="subsection-heading"><div><h2>工单操作与回执</h2><p>所有写操作统一进入 Action Gateway。</p></div></div><div class="business-grid">${state.employeeActions.map(actionCard).join("")}</div></section>` : ""}</section>`;
+  }
+  return `<section class="role-workspace employee-workspace">
+    ${roleSubnav("employee")}
+    ${panelHeading("HUMAN + AI CO-DRIVING", "人工接管", "列表展示待接管和协同中的会话；人工可多轮回复，交还 AI 不代表完结。")}
     ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
-    <section class="employee-section">
-      <div class="subsection-heading"><div><h2>人机共驾</h2><p>不建设排队、抢单或坐席系统；同一时刻只允许一方输出。</p></div></div>
-      <div class="business-grid codrive-grid">${state.codriveSessions.length ? state.codriveSessions.map((session) => `<article class="codrive-card">
-        <div class="management-card-top">${cardIcon("协", session.state === "HUMAN_ACTIVE" ? "purple" : session.state === "AI_ACTIVE" ? "green" : "amber")}<span class="status ${session.state.toLowerCase()}">${escapeHtml(session.state)}</span></div>
-        <div class="management-card-title"><h3>${escapeHtml(shortText(session.title || "未命名对话", 42))}</h3><small>${escapeHtml(session.conversation_id)}</small></div>
-        <p>${escapeHtml(session.request_reason || "AI 已承接并持续待命")}</p>
-        <div class="management-card-meta"><span>员工消息</span><strong>${session.staff_message_count || 0} 条</strong><span>最近 Agent</span><strong>${escapeHtml(agentName(session.last_agent_id))}</strong><span>更新时间</span><strong>${formatTime(session.updated_at)}</strong></div>
-        <div class="card-actions"><button class="secondary" data-codrive-open="${escapeHtml(session.conversation_id)}">查看交接包</button>${session.state === "HANDOFF_REQUESTED" ? `<button data-codrive-accept="${escapeHtml(session.conversation_id)}" data-codrive-version="${session.version}">接受协同</button>` : ""}</div>
-      </article>`).join("") : `<div class="run-empty">当前没有人机共驾记录。</div>`}</div>
-    </section>
+    ${codriveTable()}
     ${selected ? `<section class="codrive-detail">
       <div class="subsection-heading"><div><h2>交接包</h2><p>${escapeHtml(selected.conversation_id)} · ${escapeHtml(selected.state)}</p></div><button class="secondary" data-action="close-codrive-detail">收起</button></div>
       <div class="handoff-facts">${fact("请求方", selected.requested_by || "—")}${fact("请求原因", selected.request_reason || "—")}${fact("处置摘要", selected.handoff_summary || "暂无")}${fact("AI 状态", "始终待命")}</div>
       <div class="handoff-messages">${state.employeeConversationMessages.map((message) => `<article class="message ${message.role}"><span class="message-role">${message.role === "staff" ? "员工" : message.role === "user" ? "用户" : "AI"}</span><div class="message-body"><p>${escapeHtml(message.content)}</p><div class="bubble-meta"><time>${formatTime(message.created_at)}</time></div></div></article>`).join("")}</div>
       ${selected.state === "HUMAN_ACTIVE" ? `<form class="staff-reply-form" id="staff-reply-form" data-conversation-id="${escapeHtml(selected.conversation_id)}" data-version="${selected.version}"><textarea name="content" rows="3" placeholder="员工可以连续回复多轮…" required></textarea><button>发送员工回复</button></form><form class="return-ai-form" id="return-ai-form" data-conversation-id="${escapeHtml(selected.conversation_id)}" data-version="${selected.version}"><textarea name="summary" rows="2" placeholder="处置摘要（可选，AI 会同时读取完整人工消息）"></textarea><button>交还 AI</button></form><p class="section-note">没有“结束会话”按钮。交还后 AI 恢复承接并继续待命，之后仍可再次进入人机共驾。</p>` : ""}
     </section>` : ""}
-    <section class="employee-section">
-      <div class="subsection-heading"><div><h2>全部演示工单</h2><p>更新、关闭和删除只生成确认草稿；删除需要两次确认并采用软删除。</p></div></div>
-      <div class="business-grid">${state.employeeWorkOrders.length ? state.employeeWorkOrders.map((item) => workOrderCard(item, true)).join("") : `<div class="run-empty">当前没有工单。</div>`}</div>
-    </section>
-    ${state.employeeActions.length ? `<section class="employee-section"><div class="subsection-heading"><div><h2>工单操作与回执</h2><p>所有写操作统一进入 Action Gateway。</p></div></div><div class="business-grid">${state.employeeActions.map(actionCard).join("")}</div></section>` : ""}
   </section>`;
 }
 
 function releasePanel() {
   return `<div class="platform-content">
-    ${panelHeading("VERSIONED CHANGE", "Release 管理", "用卡片查看每个版本的状态和发布动作。只有人工发布或回滚才会改变下一条新消息。", `<button class="primary-button" data-action="new-release">＋ 创建候选版本</button>`)}
+    ${panelHeading("VERSIONED CHANGE", "Release 管理", "先查看 Agent 级变化，再展开该 Agent 下 Skill、RAG、MCP 与 Tool 的前后差异。", `<button class="primary-button" data-action="new-release">＋ 创建候选版本</button>`)}
     ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
-    <div class="management-grid">
-      ${state.releases
-        .map(
-          (release) => `<article class="management-card">
-            <div class="management-card-top">${cardIcon("R", release.status === "ACTIVE" ? "green" : "amber")}<span class="status ${release.status.toLowerCase()}">${release.status}</span></div>
-            <div class="management-card-title"><h3>${escapeHtml(release.version)}</h3><small>${escapeHtml(release.id)}</small></div>
-            <p>${escapeHtml(shortText(release.change_summary, 150))}</p>
-            <div class="management-card-meta"><span>创建时间</span><strong>${formatTime(release.created_at)}</strong><span>发布时间</span><strong>${release.published_at ? formatTime(release.published_at) : "尚未发布"}</strong></div>
-            <div class="card-actions">
-              <button class="secondary" data-release-detail-id="${release.id}">查看变更</button>
-              ${
-                release.status === "ACTIVE"
-                  ? ""
-                  : `<button class="secondary" data-release-id="${release.id}" data-release-action="${
-                      release.status === "CANDIDATE" ? "publish" : "rollback"
-                    }">${release.status === "CANDIDATE" ? "人工发布" : "回滚到此版本"}</button>`
-              }
-            </div>
-          </article>`,
-        )
-        .join("")}
-    </div>
+    <div class="table-shell"><table class="data-table"><thead><tr><th>Release</th><th>状态</th><th>变更说明</th><th>创建 / 发布</th><th>操作</th></tr></thead><tbody>${state.releases.map((release) => `<tr>
+      <td><strong>${escapeHtml(release.version)}</strong><small>${escapeHtml(release.id)}</small></td>
+      <td><span class="status ${release.status.toLowerCase()}">${release.status}</span></td>
+      <td><span class="cell-clamp">${escapeHtml(release.change_summary)}</span></td>
+      <td>${formatTime(release.created_at)}<small>${release.published_at ? `发布：${formatTime(release.published_at)}` : "尚未发布"}</small></td>
+      <td><div class="row-actions"><button class="secondary" data-release-detail-id="${release.id}">查看分层 Diff</button>${release.status === "ACTIVE" ? "" : `<button class="secondary" data-release-id="${release.id}" data-release-action="${release.status === "CANDIDATE" ? "publish" : "rollback"}">${release.status === "CANDIDATE" ? "人工发布" : "回滚"}</button>`}</div></td>
+    </tr>`).join("")}</tbody></table></div>
     ${state.releaseEditorOpen ? editorDialog("创建候选 Release", "复制当前 Active 配置并固定本次 Agent 与能力快照。", `<form class="release-form modal-form" id="release-form"><label><span>候选版本名</span><input name="version" placeholder="例如 V0.5.9-next" required /></label><label><span>变更说明</span><textarea name="summary" rows="4" placeholder="说明本次变更内容" required></textarea></label><div class="form-actions"><button>创建候选版本</button><button type="button" class="secondary" data-action="close-release-editor">取消</button></div></form>`, "close-release-editor") : ""}
     ${releaseDiff()}
   </div>`;
@@ -381,29 +432,12 @@ function releaseDiff() {
   const detail = state.selectedRelease;
   if (!detail) return "";
   const diff = detail.diff || {};
-  const body = `<section class="detail-card embedded-detail">
-    <div class="trace-summary">
-      ${fact("对比 Active", diff.base_release_id || "—")}
-      ${fact("新增 Agent", (diff.agents_added || []).map((id) => agentName(id)).join("、") || "无")}
-      ${fact("移除 Agent", (diff.agents_removed || []).map((id) => agentName(id)).join("、") || "无")}
-      ${fact("基础配置变化 Agent", (diff.agents_changed || []).map((id) => agentName(id)).join("、") || "无")}
-      ${fact("能力绑定变化 Agent", (diff.agent_bindings_changed || []).map((id) => agentName(id)).join("、") || "无")}
-      ${fact("新增 SkillVersion", (diff.skills_added || []).join("、") || "无")}
-      ${fact("移除 SkillVersion", (diff.skills_removed || []).join("、") || "无")}
-      ${fact("未变化 SkillVersion", (diff.skills_unchanged || []).join("、") || "无")}
-      ${fact("新增 RAGVersion", (diff.rag_added || []).join("、") || "无")}
-      ${fact("移除 RAGVersion", (diff.rag_removed || []).join("、") || "无")}
-      ${fact("未变化 RAGVersion", (diff.rag_unchanged || []).join("、") || "无")}
-      ${fact("新增 MCP Server", (diff.mcp_added || []).join("、") || "无")}
-      ${fact("移除 MCP Server", (diff.mcp_removed || []).join("、") || "无")}
-      ${fact("配置变更 MCP Server", (diff.mcp_changed || []).join("、") || "无")}
-      ${fact("未变化 MCP Server", (diff.mcp_unchanged || []).join("、") || "无")}
-      ${fact("新增预置 Tool", (diff.tools_added || []).join("、") || "无")}
-      ${fact("移除预置 Tool", (diff.tools_removed || []).join("、") || "无")}
-    </div>
-    <details><summary>查看候选 Release 的 Agent 绑定快照</summary><pre>${escapeHtml(JSON.stringify(diff.agent_binding_snapshot || {}, null, 2))}</pre></details>
+  const capabilityLabel = { skills: "Skill", rag: "RAG", mcp_tools: "MCP Tool", tools: "预置 Tool" };
+  const capabilityDiff = (changes) => Object.entries(changes || {}).map(([key, value]) => `<div class="capability-diff-row"><strong>${capabilityLabel[key] || key}</strong><div class="before-after"><div><span>变更前</span>${(value.before || []).length ? value.before.map((item) => `<code>${escapeHtml(item.name)}<small>${escapeHtml(item.id)}</small></code>`).join("") : `<em>无</em>`}</div><div><span>变更后</span>${(value.after || []).length ? value.after.map((item) => `<code>${escapeHtml(item.name)}<small>${escapeHtml(item.id)}</small></code>`).join("") : `<em>无</em>`}</div></div></div>`).join("");
+  const body = `<section class="detail-card embedded-detail release-diff"><div class="trace-summary">${fact("变更前 Active", diff.base_release_id || "—")}${fact("变更后 Release", detail.id)}${fact("Agent 总数", String((diff.agent_changes || []).length))}</div>
+    <div class="agent-diff-list">${(diff.agent_changes || []).map((item) => `<details class="agent-diff" ${item.change_type !== "UNCHANGED" ? "open" : ""}><summary><div><strong>${escapeHtml(item.agent_name)}</strong><small>${escapeHtml(item.agent_id)}</small></div><span class="diff-state ${item.change_type.toLowerCase()}">${escapeHtml(item.change_type)}</span></summary><div class="agent-before-after"><div><span>Agent 变更前</span><pre>${escapeHtml(JSON.stringify(item.before || "无", null, 2))}</pre></div><div><span>Agent 变更后</span><pre>${escapeHtml(JSON.stringify(item.after || "无", null, 2))}</pre></div></div><h4>该 Agent 下的能力变化</h4>${capabilityDiff(item.capabilities)}</details>`).join("")}</div>
   </section>`;
-  return editorDialog(`${detail.version} · 变更明细`, "对比当前 Active Release 的 Agent 和能力快照。", body, "close-release-detail", true);
+  return editorDialog(`${detail.version} · Agent 分层 Diff`, "一级对比 Agent；展开后查看该 Agent 下各类能力的变更前后。", body, "close-release-detail", true);
 }
 
 function agentPanel() {
@@ -474,9 +508,7 @@ function skillPanel() {
   return `<div class="platform-content">
     ${panelHeading("NATURAL LANGUAGE CAPABILITY", "Skill 管理", "创建、导入和校验自然语言能力。校验通过后，再到 Agent 卡片内装配。", `<button class="ghost-button" data-action="open-skill-import">⇧ 从 GitHub 导入</button><button class="primary-button" data-action="new-skill">＋ 新增 Skill</button>`)}
     ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
-    <div class="management-grid">
-      ${state.skills.length ? state.skills.map(skillCard).join("") : `<div class="run-empty">还没有 Skill，请点击右上角新增或导入。</div>`}
-    </div>
+    ${skillTable()}
     ${state.skillEditorOpen ? editorDialog(current ? `编辑·${current.name}` : "新增 Skill", "编辑已有 Skill 会生成新的不可变版本，不覆盖历史。", `<form class="capability-form modal-capability-form" id="skill-form">
       <label><span>名称</span><input name="name" maxlength="80" value="${escapeHtml(current?.name || "")}" required /></label>
       <label><span>说明</span><input name="description" maxlength="500" value="${escapeHtml(current?.description || "")}" required /></label>
@@ -488,6 +520,18 @@ function skillPanel() {
     </form>`, "close-skill-editor", true) : ""}
     ${state.skillImportOpen ? editorDialog("从 GitHub 导入 Skill", "系统会固定 commit、扫描文件并保留导入或拒绝记录。", `<form class="import-form modal-form" id="skill-import-form"><label><span>公开 GitHub Skill URL</span><input name="url" type="url" placeholder="https://github.com/owner/repo/tree/main/path" required /></label><button>固定 commit 并安全扫描</button></form>${skillImportAttempts()}`, "close-skill-import", true) : ""}
   </div>`;
+}
+
+function skillTable() {
+  if (!state.skills.length) return `<div class="run-empty">还没有 Skill，请点击右上角新增或导入。</div>`;
+  return `<div class="table-shell"><table class="data-table"><thead><tr><th>Skill</th><th>状态</th><th>适用条件</th><th>装配 Agent</th><th>版本 / 更新</th><th>操作</th></tr></thead><tbody>${state.skills.map((skill) => `<tr>
+    <td><strong>${escapeHtml(skill.name)}</strong><small>${escapeHtml(skill.description)}</small></td>
+    <td><span class="status ${skill.status.toLowerCase()}">${escapeHtml(skill.status)}</span></td>
+    <td><span class="cell-clamp">${escapeHtml(skill.current_version.applicability)}</span></td>
+    <td>${(skill.bound_agent_ids || []).map((id) => agentName(id)).join("、") || "暂无"}</td>
+    <td>v${skill.current_version.version_number}<small>${formatTime(skill.updated_at)}</small></td>
+    <td><div class="row-actions"><button class="secondary" data-skill-action="edit" data-skill-id="${skill.id}">编辑</button><button class="secondary" data-skill-action="validate" data-skill-id="${skill.id}">校验</button><button class="secondary" data-skill-action="disable" data-skill-id="${skill.id}">停用</button></div></td>
+  </tr>`).join("")}</tbody></table></div>`;
 }
 
 function skillImportAttempts() {
@@ -527,11 +571,9 @@ function ragPanel() {
   const tested = state.ragQueryResult;
   const draft = state.ragDraft;
   return `<div class="platform-content">
-    ${panelHeading("RETRIEVAL AUGMENTED GENERATION", "RAG 知识库", "管理可被 Agent 装配的知识文档。每张卡片可编辑、校验、检索测试或停用。", `<button class="primary-button" data-action="new-rag">＋ 新增知识文档</button>`)}
+    ${panelHeading("RETRIEVAL AUGMENTED GENERATION", "RAG 知识库", "知识文档适合列表比较；编辑、校验和检索测试从每行操作进入。", `<button class="primary-button" data-action="new-rag">＋ 新增知识文档</button>`)}
     ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
-    <div class="management-grid">
-      ${state.ragDocuments.length ? state.ragDocuments.map(ragCard).join("") : `<div class="run-empty">还没有 RAG 知识文档，请点击右上角新增。</div>`}
-    </div>
+    ${ragTable()}
     ${state.ragEditorOpen ? editorDialog(state.editingRag ? `编辑·${state.editingRag.name}` : "新增 RAG 知识文档", "先预览切片，确认后保存并建立真实本地索引。", `<form class="capability-form modal-capability-form" id="rag-form" data-rag-id="${escapeHtml(state.editingRag?.id || "")}">
       <label><span>文档名称</span><input name="name" maxlength="100" value="${escapeHtml(draft.name)}" required /></label>
       <label><span>标签（逗号分隔）</span><input name="tags" value="${escapeHtml(draft.tags.join(","))}" required /></label>
@@ -549,6 +591,18 @@ function ragPanel() {
       ${ragResultColumn("加权 RRF 混合", tested.hybrid_results)}
     </section>` : ""}`, "close-rag-test", true) : ""}
   </div>`;
+}
+
+function ragTable() {
+  if (!state.ragDocuments.length) return `<div class="run-empty">还没有 RAG 知识文档，请点击右上角新增。</div>`;
+  return `<div class="table-shell"><table class="data-table"><thead><tr><th>知识文档</th><th>状态</th><th>标签</th><th>装配 Agent</th><th>索引</th><th>操作</th></tr></thead><tbody>${state.ragDocuments.map((document) => `<tr>
+    <td><strong>${escapeHtml(document.name)}</strong><small>v${document.current_version.version_number} · ${escapeHtml(document.current_version.version_note)}</small></td>
+    <td><span class="status ${document.status.toLowerCase()}">${escapeHtml(document.status)}</span></td>
+    <td><div class="card-chip-list">${document.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div></td>
+    <td>${(document.bound_agent_ids || []).map((id) => agentName(id)).join("、") || "暂无"}</td>
+    <td>${document.current_version.chunks.length} 个切片<small>${escapeHtml(document.current_version.keyword_engine)} + ${escapeHtml(document.current_version.embedding_model)}</small></td>
+    <td><div class="row-actions"><button class="secondary" data-rag-action="edit" data-rag-id="${document.id}">编辑</button><button class="secondary" data-rag-action="test" data-rag-id="${document.id}">检索测试</button><button class="secondary" data-rag-action="validate" data-rag-id="${document.id}">校验</button><button class="secondary" data-rag-action="disable" data-rag-id="${document.id}">停用</button></div></td>
+  </tr>`).join("")}</tbody></table></div>`;
 }
 
 function ragResultColumn(title, items) {
@@ -580,9 +634,9 @@ function mcpPanel() {
     clarification_prompt: "", default_arguments: {}, result_paths: [],
   };
   return `<div class="platform-content">
-    ${panelHeading("REMOTE READ-ONLY TOOLS", "MCP Server", "管理远程连接、只读校验和 Tool 白名单。Tool 与 Agent 的装配只在 Agent 卡片内完成。", `<button class="primary-button" data-action="new-mcp">＋ 新增 MCP Server</button>`)}
+    ${panelHeading("REMOTE READ-ONLY TOOLS", "MCP Server", "Server 数量与连接状态适合列表比较；Tool 与 Agent 的装配仍只在 Agent 内完成。", `<button class="primary-button" data-action="new-mcp">＋ 新增 MCP Server</button>`)}
     ${state.notice ? `<div class="notice">${escapeHtml(state.notice)}</div>` : ""}
-    <div class="management-grid">${state.mcpServers.length ? state.mcpServers.map(mcpCard).join("") : `<div class="run-empty">还没有 MCP Server，请点击右上角新增。</div>`}</div>
+    ${mcpTable()}
     ${state.mcpEditorOpen ? editorDialog(current ? `编辑·${current.name}` : "新增 MCP Server", "保存远程 Endpoint 和只读白名单；连接测试通过前不会进入 Release。", `<form class="capability-form modal-capability-form" id="mcp-form">
       <label><span>MCP 名称</span><input name="name" maxlength="120" value="${escapeHtml(current?.name || "")}" required /></label>
       <label><span>Git 源地址</span><input name="git_url" type="url" value="${escapeHtml(current?.git_url || "")}" required /></label>
@@ -598,6 +652,19 @@ function mcpPanel() {
     </form>`, "close-mcp-editor", true) : ""}
     ${state.testingMcp ? editorDialog(`Tool 测试·${state.testingMcp.name}`, "只能选择白名单内的只读 Tool；本次调用不改变 Release。", `<form class="capability-form modal-capability-form mcp-tool-test-form" data-mcp-id="${escapeHtml(state.testingMcp.id)}"><label><span>白名单 Tool</span><select name="tool_name">${(state.testingMcp.allowed_tools || []).map((name) => `<option>${escapeHtml(name)}</option>`).join("")}</select></label><label class="full"><span>参数 JSON</span><textarea name="arguments" rows="8">{}</textarea></label><div class="form-actions full"><button>实际调用</button></div></form>${state.mcpToolResult ? `<section class="detail-card embedded-detail"><h3>实际调用结果</h3><pre>${escapeHtml(JSON.stringify(state.mcpToolResult, null, 2))}</pre></section>` : ""}`, "close-mcp-test", true) : ""}
   </div>`;
+}
+
+function mcpTable() {
+  if (!state.mcpServers.length) return `<div class="run-empty">还没有 MCP Server，请点击右上角新增。</div>`;
+  return `<div class="table-shell"><table class="data-table"><thead><tr><th>MCP Server</th><th>状态</th><th>Endpoint / 版本</th><th>只读白名单</th><th>装配 Agent</th><th>最近测试</th><th>操作</th></tr></thead><tbody>${state.mcpServers.map((server) => `<tr>
+    <td><strong>${escapeHtml(server.name)}</strong><small>${escapeHtml(server.transport)}</small></td>
+    <td><span class="status ${server.status.toLowerCase()}">${escapeHtml(server.status)}</span></td>
+    <td><span class="cell-clamp">${escapeHtml(server.endpoint)}</span><small>${escapeHtml(server.version_ref)}</small></td>
+    <td><div class="card-chip-list">${(server.allowed_tools || []).map((name) => `<span>${escapeHtml(name)}</span>`).join("") || `<span class="muted-chip">无</span>`}</div></td>
+    <td>${(server.bound_agent_ids || []).map((id) => agentName(id)).join("、") || "暂无"}</td>
+    <td>${formatTime(server.last_test_at)}<small>${server.last_test?.latency_ms != null ? `${server.last_test.latency_ms} ms` : "未测试"}</small></td>
+    <td><div class="row-actions"><button class="secondary" data-mcp-action="edit" data-mcp-id="${server.id}">编辑</button><button class="secondary" data-mcp-action="test" data-mcp-id="${server.id}">连接</button><button class="secondary" data-mcp-action="tool" data-mcp-id="${server.id}">Tool</button><button class="secondary" data-mcp-action="disable" data-mcp-id="${server.id}">停用</button></div></td>
+  </tr>`).join("")}</tbody></table></div>`;
 }
 
 function mcpCard(server) {
@@ -628,6 +695,7 @@ const eventLabels = {
   agent_selected: "选择垂直 Agent",
   skill_considered: "检查已发布 Skill",
   skill_activated: "激活 SkillVersion",
+  skill_skipped: "跳过不适用 Skill",
   rag_retrieval_requested: "RAG 检索请求",
   rag_retrieval_completed: "RAG 关键词 / 向量 / 混合召回",
   rag_citation_validation: "RAG 引用校验",
@@ -649,7 +717,10 @@ const eventLabels = {
   action_cancel_received: "收到操作取消",
   action_gateway_completed: "Action Gateway 回执",
   codrive_handoff_requested: "发起人机共驾",
+  codrive_policy_evaluated: "AI 转人工策略判断",
   codrive_ai_suppressed: "员工持有输出权，AI 待命",
+  badcase_detected: "自动捕获 Badcase 候选",
+  evaluation_completed: "本 Run 即时 Evaluation",
   cloud_call_failed: "云 API 调用失败并降级",
   assistant_response_completed: "客服回答完成",
   done: "Run 完成",
@@ -750,8 +821,11 @@ function runSummary(detail) {
     }),
     { miss: 0, hit: 0, output: 0 },
   );
+  const capabilitySummary = detail.capability_summary || {};
+  const evaluation = capabilitySummary.evaluation;
   return `<section class="run-total">
     <h3>Run 汇总</h3>
+    ${capabilityHitStrip({ capability_summary: capabilitySummary, agent_id: detail.run.agent_id, agent_name: capabilitySummary.agent?.name, release_version: detail.run.release_version })}
     <div class="trace-summary">
       ${fact("垂直 Agent", agentName(detail.run.agent_id))}
       ${fact("云 API 调用", String(snaps.length))}
@@ -763,6 +837,8 @@ function runSummary(detail) {
       ${fact("人民币总成本", formatCny(detail.run.estimated_cost_cny))}
       ${fact("完成时间", formatTime(detail.run.finished_at))}
     </div>
+    ${evaluation ? `<section class="evaluation-summary"><div class="subsection-heading"><div><h3>即时 Evaluation · ${escapeHtml(evaluation.status)} / ${evaluation.score}</h3><p>只评估本次 Run 的可观测证据，不包含目标 3 的生命周期闭环。</p></div></div><div class="evaluation-checks">${(evaluation.checks || []).map((item) => `<article><span class="status ${item.status === "PASS" ? "done" : item.status === "FAIL" ? "error" : "running"}">${escapeHtml(item.status)}</span><div><strong>${escapeHtml(item.code)}</strong><p>${escapeHtml(item.explanation)}</p></div></article>`).join("")}</div></section>` : ""}
+    ${(capabilitySummary.badcases || []).length ? `<section class="badcase-summary"><h3>本 Run 自动捕获的 Badcase 候选</h3>${capabilitySummary.badcases.map((item) => `<article><strong>${escapeHtml(item.rule_code)}</strong><span class="status running">${escapeHtml(item.status)}</span><pre>${escapeHtml(JSON.stringify(item.evidence, null, 2))}</pre></article>`).join("")}</section>` : ""}
   </section>`;
 }
 
@@ -817,16 +893,16 @@ function runDrawer(detail) {
 function runsPanel() {
   const detail = state.selectedRun;
   return `<div class="platform-content">
-    ${panelHeading("RUNTIME EVIDENCE", "Run 与 Trace", "每张卡片代表一次真实运行。点击查看详情后，再展开完整 Trace、模型用量和 MCP 快照。")}
-    <div class="management-grid run-card-grid">
-      ${state.runs.length ? state.runs.map((run) => `<article class="management-card">
-        <div class="management-card-top">${cardIcon("→", run.status === "DONE" ? "green" : run.status === "ERROR" ? "red" : "amber")}<span class="status ${run.status.toLowerCase()}">${escapeHtml(run.status)}</span></div>
-        <div class="management-card-title"><h3>${escapeHtml(agentName(run.agent_id))}</h3><small>${escapeHtml(run.release_version)}</small></div>
-        <p class="endpoint-line">${escapeHtml(run.id)}</p>
-        <div class="management-card-meta"><span>开始时间</span><strong>${formatTime(run.started_at)}</strong><span>延迟</span><strong>${run.latency_ms == null ? "运行中" : `${run.latency_ms} ms`}</strong><span>预估成本</span><strong>${formatCny(run.estimated_cost_cny)}</strong></div>
-        <div class="card-actions"><button class="secondary" data-run-id="${escapeHtml(run.id)}">查看完整 Trace</button></div>
-      </article>`).join("") : `<div class="run-empty">还没有真实 Run。</div>`}
-    </div>
+    ${panelHeading("RUNTIME EVIDENCE", "Run 与 Trace", "按时间列表比较每次真实运行的 Agent、能力命中、Evaluation、Token 与成本。")}
+    ${state.runs.length ? `<div class="table-shell"><table class="data-table"><thead><tr><th>Run</th><th>Agent / Release</th><th>状态 / Evaluation</th><th>能力命中</th><th>三类 Token</th><th>成本 / 延迟</th><th>操作</th></tr></thead><tbody>${state.runs.map((run) => { const summary = run.capability_summary || {}; const usage = summary.usage || {}; return `<tr>
+      <td><strong>${formatTime(run.started_at)}</strong><small>${escapeHtml(run.id)}</small></td>
+      <td>${escapeHtml(agentName(run.agent_id))}<small>${escapeHtml(run.release_version)}</small></td>
+      <td><span class="status ${run.status.toLowerCase()}">${escapeHtml(run.status)}</span><small>${summary.evaluation ? `${summary.evaluation.status} / ${summary.evaluation.score}` : "尚未评估"}</small></td>
+      <td><div class="card-chip-list"><span>${(summary.skills || []).length} Skill</span><span>${summary.rag?.evidence_count || 0} RAG</span><span>${(summary.mcp_calls || []).length} MCP</span><span>${(summary.preset_tools || []).length} Tool</span></div></td>
+      <td>未命中 ${usage.prompt_cache_miss_tokens ?? 0}<small>命中 ${usage.prompt_cache_hit_tokens ?? 0} · 输出 ${usage.completion_tokens ?? 0}</small></td>
+      <td>${formatCny(run.estimated_cost_cny)}<small>${run.latency_ms == null ? "运行中" : `${run.latency_ms} ms`}</small></td>
+      <td><button class="secondary" data-run-id="${escapeHtml(run.id)}">完整 Trace</button></td>
+    </tr>`; }).join("")}</tbody></table></div>` : `<div class="run-empty">还没有真实 Run。</div>`}
     ${detail ? editorDialog(`Run 详情·${detail.run.id}`, "展示该次运行固定的 Release、Agent、输入输出、Trace 和成本快照。", runDetailContent(detail), "close-run-detail", true) : ""}
   </div>`;
 }
@@ -854,8 +930,8 @@ function platformPage() {
         state.platformSection === "runs" ? "active" : ""
       }">Run 与 Trace</button>
       <div class="later-list">
-        <span>后续版本</span>
-        <p>Badcase · 成本治理</p>
+        <span>已并入单次 Run</span>
+        <p>Badcase 候选 · Evaluation · Trace · 三类 Token · 人民币成本</p>
       </div>
     </aside>
     ${state.platformSection === "agents" ? agentPanel() : state.platformSection === "release" ? releasePanel() : state.platformSection === "skills" ? skillPanel() : state.platformSection === "rag" ? ragPanel() : state.platformSection === "mcp" ? mcpPanel() : runsPanel()}
@@ -912,6 +988,21 @@ function bindEvents() {
     });
   });
 
+  document.querySelectorAll("[data-user-section]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.userSection = button.dataset.userSection;
+      await loadUserData();
+      render();
+    });
+  });
+  document.querySelectorAll("[data-employee-section]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.employeeSection = button.dataset.employeeSection;
+      await loadEmployeeData();
+      render();
+    });
+  });
+
   document.querySelectorAll("[data-action='new-conversation']").forEach((button) => {
     button.addEventListener("click", startNewConversation);
   });
@@ -926,6 +1017,19 @@ function bindEvents() {
   });
   document.querySelectorAll("[data-message-run-id]").forEach((button) => {
     button.addEventListener("click", () => openRunDrawer(button.dataset.messageRunId));
+  });
+  document.querySelectorAll("[data-citation-run-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const message = state.messages.find((item) => item.run_id === button.dataset.citationRunId);
+      state.citationOpen = (message?.capability_summary?.rag?.citations || []).find(
+        (item) => item.chunk_id === button.dataset.citationChunkId,
+      ) || null;
+      render();
+    });
+  });
+  document.querySelector("[data-action='close-citation']")?.addEventListener("click", () => {
+    state.citationOpen = null;
+    render();
   });
   document.querySelectorAll("[data-suggestion]").forEach((button) => {
     button.addEventListener("click", () => {

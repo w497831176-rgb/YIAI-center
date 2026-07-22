@@ -305,6 +305,20 @@ CREATE INDEX IF NOT EXISTS idx_agent_configs_updated ON agent_configs(updated_at
 """
 
 
+MIGRATION_10 = """
+CREATE TABLE IF NOT EXISTS run_evaluations (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+    status TEXT NOT NULL CHECK(status IN ('PASS','WARN','FAIL')),
+    score INTEGER NOT NULL CHECK(score BETWEEN 0 AND 100),
+    checks_json TEXT NOT NULL,
+    evaluated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_run_evaluations_time
+ON run_evaluations(evaluated_at DESC);
+"""
+
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "router": {
         "id": "router-default",
@@ -418,6 +432,13 @@ def init_db() -> None:
                 (now_iso(),),
             )
             applied.add(9)
+        if 10 not in applied:
+            conn.executescript(MIGRATION_10)
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(10, ?)",
+                (now_iso(),),
+            )
+            applied.add(10)
         count = conn.execute("SELECT COUNT(*) AS n FROM releases").fetchone()["n"]
         if count == 0:
             release_id = "rel_v055_default"
@@ -1715,8 +1736,97 @@ def get_release_detail(release_id: str) -> dict[str, Any]:
         for agent_id in set(target_bindings) | set(active_bindings)
         if target_bindings.get(agent_id) != active_bindings.get(agent_id)
     )
+
+    def named_binding_snapshot(
+        config: dict[str, Any],
+    ) -> dict[str, dict[str, list[dict[str, str]]]]:
+        snapshot: dict[str, dict[str, list[dict[str, str]]]] = {
+            str(agent["id"]): {"skills": [], "rag": [], "mcp_tools": [], "tools": []}
+            for agent in config.get("agents", [])
+        }
+        for skill in config.get("skills", []):
+            entry = {
+                "id": str(skill["skill_version_id"]),
+                "name": str(skill.get("name") or skill["skill_version_id"]),
+            }
+            for agent_id in skill.get("agent_ids", []):
+                snapshot.setdefault(agent_id, {"skills": [], "rag": [], "mcp_tools": [], "tools": []})["skills"].append(entry)
+        for document in config.get("rag", []):
+            entry = {
+                "id": str(document["rag_version_id"]),
+                "name": str(document.get("name") or document["rag_version_id"]),
+            }
+            for agent_id in document.get("agent_ids", []):
+                snapshot.setdefault(agent_id, {"skills": [], "rag": [], "mcp_tools": [], "tools": []})["rag"].append(entry)
+        for server in config.get("mcp", []):
+            tool_agents = server.get("tool_agent_ids") or {}
+            if not isinstance(tool_agents, dict):
+                tool_agents = {
+                    tool_name: server.get("agent_ids", [])
+                    for tool_name in server.get("allowed_tools", [])
+                }
+            for tool_name, agent_ids in tool_agents.items():
+                entry = {
+                    "id": f"{server['server_id']}::{tool_name}",
+                    "name": f"{server.get('name', server['server_id'])} / {tool_name}",
+                }
+                for agent_id in agent_ids:
+                    snapshot.setdefault(agent_id, {"skills": [], "rag": [], "mcp_tools": [], "tools": []})["mcp_tools"].append(entry)
+        for tool in config.get("tools", []):
+            entry = {
+                "id": str(tool["tool_id"]),
+                "name": str(tool.get("name") or tool["tool_id"]),
+            }
+            for agent_id in tool.get("agent_ids", []):
+                snapshot.setdefault(agent_id, {"skills": [], "rag": [], "mcp_tools": [], "tools": []})["tools"].append(entry)
+        for values in snapshot.values():
+            for key in values:
+                values[key] = sorted(
+                    {item["id"]: item for item in values[key]}.values(),
+                    key=lambda item: item["id"],
+                )
+        return snapshot
+
+    target_named = named_binding_snapshot(target["config"])
+    active_named = named_binding_snapshot(active["config"])
+    agent_changes = []
+    for agent_id in sorted(target_agent_ids | active_agent_ids):
+        before_agent = active_agents.get(agent_id)
+        after_agent = target_agents.get(agent_id)
+        if before_agent is None:
+            change_type = "ADDED"
+        elif after_agent is None:
+            change_type = "REMOVED"
+        elif agent_id in agents_changed or agent_id in agent_bindings_changed:
+            change_type = "CHANGED"
+        else:
+            change_type = "UNCHANGED"
+        capability_changes: dict[str, Any] = {}
+        for key in ("skills", "rag", "mcp_tools", "tools"):
+            before_items = (active_named.get(agent_id) or {}).get(key, [])
+            after_items = (target_named.get(agent_id) or {}).get(key, [])
+            before_by_id = {item["id"]: item for item in before_items}
+            after_by_id = {item["id"]: item for item in after_items}
+            capability_changes[key] = {
+                "before": before_items,
+                "after": after_items,
+                "added": [after_by_id[item_id] for item_id in sorted(set(after_by_id) - set(before_by_id))],
+                "removed": [before_by_id[item_id] for item_id in sorted(set(before_by_id) - set(after_by_id))],
+                "unchanged": [after_by_id[item_id] for item_id in sorted(set(before_by_id) & set(after_by_id))],
+            }
+        agent_changes.append(
+            {
+                "agent_id": agent_id,
+                "agent_name": str((after_agent or before_agent or {}).get("name", agent_id)),
+                "change_type": change_type,
+                "before": before_agent,
+                "after": after_agent,
+                "capabilities": capability_changes,
+            }
+        )
     target["diff"] = {
         "base_release_id": active_id,
+        "agent_changes": agent_changes,
         "agents_added": sorted(target_agent_ids - active_agent_ids),
         "agents_removed": sorted(active_agent_ids - target_agent_ids),
         "agents_changed": sorted(agents_changed),
@@ -2017,6 +2127,171 @@ def finish_run_without_answer(
     return {"estimated_cost": None, "estimated_cost_cny": None}
 
 
+def record_badcase_candidate(
+    run_id: str, rule_code: str, evidence: dict[str, Any]
+) -> dict[str, Any]:
+    """Record an automatic per-Run signal without starting a lifecycle workflow."""
+    candidate_id = new_id("badcase")
+    created_at = now_iso()
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO badcase_candidates(
+                id, run_id, rule_code, evidence_json, created_at
+            ) VALUES(?, ?, ?, ?, ?)
+            """,
+            (
+                candidate_id,
+                run_id,
+                str(rule_code)[:100],
+                json.dumps(evidence, ensure_ascii=False),
+                created_at,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM badcase_candidates WHERE run_id=? AND rule_code=?",
+            (run_id, str(rule_code)[:100]),
+        ).fetchone()
+    result = dict(row)
+    result["evidence"] = json.loads(result.pop("evidence_json"))
+    return result
+
+
+def save_run_evaluation(run_id: str) -> dict[str, Any]:
+    """Evaluate only the observable facts of one Run; no root-cause lifecycle."""
+    with connection() as conn:
+        run = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        if run is None:
+            raise KeyError(run_id)
+        event_rows = conn.execute(
+            "SELECT event_type, payload_json FROM trace_events WHERE run_id=? ORDER BY sequence",
+            (run_id,),
+        ).fetchall()
+        events = [
+            {"event_type": row["event_type"], "payload": json.loads(row["payload_json"])}
+            for row in event_rows
+        ]
+        event_types = {item["event_type"] for item in events}
+        has_answer = conn.execute(
+            "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1",
+            (run_id,),
+        ).fetchone() is not None
+        cloud_rows = conn.execute(
+            "SELECT usage_status FROM cloud_call_snaps WHERE run_id=?",
+            (run_id,),
+        ).fetchall()
+        badcase_rows = conn.execute(
+            "SELECT rule_code FROM badcase_candidates WHERE run_id=? ORDER BY created_at",
+            (run_id,),
+        ).fetchall()
+
+        checks: list[dict[str, Any]] = []
+        checks.append(
+            {
+                "code": "AGENT_SELECTION_TRACE",
+                "status": "PASS" if "agent_selected" in event_types else "WARN",
+                "explanation": "已保存唯一垂直 Agent 选择证据"
+                if "agent_selected" in event_types
+                else "本 Run 没有垂直 Agent 选择，可能是人工持有输出权",
+            }
+        )
+        checks.append(
+            {
+                "code": "ASSISTANT_OUTPUT_SAVED",
+                "status": "PASS"
+                if has_answer or "codrive_ai_suppressed" in event_types
+                else "FAIL",
+                "explanation": "回答已保存，或 Trace 明确记录了 AI 被人工输出权抑制",
+            }
+        )
+        citation_events = [
+            item for item in events if item["event_type"] == "rag_citation_validation"
+        ]
+        removed = (
+            citation_events[-1]["payload"].get("removed_unknown_citations", [])
+            if citation_events
+            else []
+        )
+        checks.append(
+            {
+                "code": "RAG_CITATION_INTEGRITY",
+                "status": "WARN" if removed else "PASS",
+                "explanation": "未发现越界引用"
+                if not removed
+                else f"已移除 {len(removed)} 个不在召回证据中的引用",
+            }
+        )
+        local_cost_errors = []
+        for item in events:
+            if item["event_type"] in {
+                "mcp_request",
+                "mcp_response",
+                "preset_tool_request",
+                "preset_tool_response",
+            } and item["payload"].get("model_api_cost", 0) not in {0, 0.0, None}:
+                local_cost_errors.append(item["event_type"])
+        checks.append(
+            {
+                "code": "LOCAL_CAPABILITY_COST_INTEGRITY",
+                "status": "FAIL" if local_cost_errors else "PASS",
+                "explanation": "RAG、MCP 与预置 Tool 未虚构模型成本"
+                if not local_cost_errors
+                else "发现本地能力被错误记为模型成本",
+            }
+        )
+        incomplete_usage = sum(
+            1 for row in cloud_rows if row["usage_status"] != "COMPLETE"
+        )
+        checks.append(
+            {
+                "code": "MODEL_USAGE_EVIDENCE",
+                "status": "WARN" if incomplete_usage else "PASS",
+                "explanation": "云模型三类 Token 与价格快照完整"
+                if cloud_rows and not incomplete_usage
+                else (
+                    f"有 {incomplete_usage} 次云调用 Usage 不完整，成本保持未知"
+                    if incomplete_usage
+                    else "本 Run 未调用云模型，无 Token 成本"
+                ),
+            }
+        )
+        badcase_codes = [row["rule_code"] for row in badcase_rows]
+        failure_count = sum(1 for item in checks if item["status"] == "FAIL")
+        warning_count = sum(1 for item in checks if item["status"] == "WARN")
+        if "RUN_ERROR" in badcase_codes:
+            failure_count += 1
+        status = "FAIL" if failure_count else ("WARN" if warning_count or badcase_codes else "PASS")
+        score = max(0, 100 - failure_count * 30 - warning_count * 10 - len(badcase_codes) * 5)
+        evaluated_at = now_iso()
+        evaluation_id = new_id("eval")
+        conn.execute(
+            """
+            INSERT INTO run_evaluations(id, run_id, status, score, checks_json, evaluated_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                status=excluded.status,
+                score=excluded.score,
+                checks_json=excluded.checks_json,
+                evaluated_at=excluded.evaluated_at
+            """,
+            (
+                evaluation_id,
+                run_id,
+                status,
+                score,
+                json.dumps(checks, ensure_ascii=False),
+                evaluated_at,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM run_evaluations WHERE run_id=?", (run_id,)
+        ).fetchone()
+    result = dict(row)
+    result["checks"] = json.loads(result.pop("checks_json"))
+    result["badcase_codes"] = badcase_codes
+    return result
+
+
 def fail_run(run_id: str, error_code: str) -> None:
     with connection() as conn:
         conn.execute(
@@ -2030,6 +2305,187 @@ def fail_run(run_id: str, error_code: str) -> None:
             """,
             (new_id("badcase"), run_id, json.dumps({"error_code": error_code}), now_iso()),
         )
+
+
+def _run_capability_summary(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    release_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event_rows = conn.execute(
+        "SELECT event_type, payload_json FROM trace_events WHERE run_id=? ORDER BY sequence",
+        (run_id,),
+    ).fetchall()
+    events = [
+        {"event_type": row["event_type"], "payload": json.loads(row["payload_json"])}
+        for row in event_rows
+    ]
+
+    def latest(event_type: str) -> dict[str, Any] | None:
+        matched = [item["payload"] for item in events if item["event_type"] == event_type]
+        return matched[-1] if matched else None
+
+    route = latest("route_decision")
+    selected = latest("agent_selected") or {}
+    agent_id = selected.get("agent_id")
+    agent_name = selected.get("agent_name")
+    if release_config and agent_id and not agent_name:
+        match = next(
+            (item for item in release_config.get("agents", []) if item.get("id") == agent_id),
+            None,
+        )
+        agent_name = match.get("name") if match else agent_id
+
+    skills = []
+    seen_skill_versions: set[str] = set()
+    for item in events:
+        if item["event_type"] != "skill_activated":
+            continue
+        payload = item["payload"]
+        version_id = str(payload.get("skill_version_id", ""))
+        if version_id in seen_skill_versions:
+            continue
+        seen_skill_versions.add(version_id)
+        skills.append(
+            {
+                "skill_id": payload.get("skill_id"),
+                "skill_version_id": version_id,
+                "name": payload.get("name"),
+            }
+        )
+
+    rag_event = latest("rag_retrieval_completed") or {}
+    citation_event = latest("rag_citation_validation") or {}
+    used_citations = set(citation_event.get("used_citations") or [])
+    citations = []
+    rag_documents = []
+    seen_documents: set[str] = set()
+    for item in rag_event.get("evidence") or []:
+        document_id = str(item.get("document_id", ""))
+        if document_id and document_id not in seen_documents:
+            seen_documents.add(document_id)
+            rag_documents.append(
+                {
+                    "document_id": document_id,
+                    "document_name": item.get("document_name"),
+                    "rag_version_id": item.get("rag_version_id"),
+                }
+            )
+        if item.get("citation") in used_citations:
+            citations.append(
+                {
+                    "citation": item.get("citation"),
+                    "document_id": document_id,
+                    "document_name": item.get("document_name"),
+                    "rag_version_id": item.get("rag_version_id"),
+                    "chunk_id": item.get("chunk_id"),
+                    "heading": item.get("heading"),
+                    "content": item.get("content"),
+                    "content_hash": item.get("content_hash"),
+                    "hybrid_score": item.get("hybrid_score"),
+                }
+            )
+
+    mcp_calls = []
+    for item in events:
+        if item["event_type"] != "mcp_response":
+            continue
+        payload = item["payload"]
+        mcp_calls.append(
+            {
+                "server_id": payload.get("server_id"),
+                "server_name": payload.get("server_name"),
+                "tool_name": payload.get("tool_name"),
+                "status": payload.get("status"),
+            }
+        )
+    preset_tools = []
+    for item in events:
+        if item["event_type"] not in {"preset_tool_response", "action_draft_created", "action_gateway_completed"}:
+            continue
+        payload = item["payload"]
+        tool_name = payload.get("tool_name")
+        if tool_name and tool_name not in [tool["tool_name"] for tool in preset_tools]:
+            preset_tools.append(
+                {
+                    "tool_name": tool_name,
+                    "status": payload.get("status", "DRAFT" if item["event_type"] == "action_draft_created" else None),
+                    "read_only": item["event_type"] == "preset_tool_response",
+                }
+            )
+
+    policy = latest("codrive_policy_evaluated") or {}
+    handoff = latest("codrive_handoff_requested")
+    codrive_summary = None
+    if policy or handoff:
+        codrive_summary = {
+            "evaluated": bool(policy),
+            "triggered": bool(handoff),
+            "source": (handoff or {}).get("source") or policy.get("source"),
+            "reason": (handoff or {}).get("reason") or policy.get("reason"),
+            "rule_code": (handoff or {}).get("rule_code") or policy.get("rule_code"),
+            "state": (handoff or {}).get("state"),
+        }
+
+    cloud_rows = conn.execute(
+        """
+        SELECT prompt_cache_miss_tokens, prompt_cache_hit_tokens,
+               completion_tokens, usage_status
+        FROM cloud_call_snaps WHERE run_id=? ORDER BY request_started_at
+        """,
+        (run_id,),
+    ).fetchall()
+    usage_complete = bool(cloud_rows) and all(
+        row["usage_status"] == "COMPLETE" for row in cloud_rows
+    )
+    usage = {
+        "cloud_call_count": len(cloud_rows),
+        "prompt_cache_miss_tokens": sum(row["prompt_cache_miss_tokens"] or 0 for row in cloud_rows),
+        "prompt_cache_hit_tokens": sum(row["prompt_cache_hit_tokens"] or 0 for row in cloud_rows),
+        "completion_tokens": sum(row["completion_tokens"] or 0 for row in cloud_rows),
+        "usage_status": "COMPLETE" if usage_complete else ("INCOMPLETE" if cloud_rows else "NOT_APPLICABLE"),
+    }
+    usage["total_tokens"] = (
+        usage["prompt_cache_miss_tokens"]
+        + usage["prompt_cache_hit_tokens"]
+        + usage["completion_tokens"]
+    )
+
+    badcases = []
+    for row in conn.execute(
+        "SELECT rule_code, evidence_json, status, created_at FROM badcase_candidates WHERE run_id=? ORDER BY created_at",
+        (run_id,),
+    ).fetchall():
+        item = dict(row)
+        item["evidence"] = json.loads(item.pop("evidence_json"))
+        badcases.append(item)
+    evaluation_row = conn.execute(
+        "SELECT * FROM run_evaluations WHERE run_id=?", (run_id,)
+    ).fetchone()
+    evaluation = None
+    if evaluation_row:
+        evaluation = dict(evaluation_row)
+        evaluation["checks"] = json.loads(evaluation.pop("checks_json"))
+
+    return {
+        "agent": {"id": agent_id, "name": agent_name},
+        "route": route,
+        "skills": skills,
+        "rag": {
+            "documents": rag_documents,
+            "citations": citations,
+            "evidence_count": len(rag_event.get("evidence") or []),
+        },
+        "mcp_calls": mcp_calls,
+        "preset_tools": preset_tools,
+        "codrive": codrive_summary,
+        "badcases": badcases,
+        "evaluation": evaluation,
+        "usage": usage,
+        "estimated_cost_cny": _run_cost_cny(conn, run_id),
+        "local_capability_cost_cny": 0,
+    }
 
 
 def list_runs(limit: int = 50) -> list[dict[str, Any]]:
@@ -2046,6 +2502,9 @@ def list_runs(limit: int = 50) -> list[dict[str, Any]]:
         for item in result:
             item["estimated_cost_cny"] = _run_cost_cny(conn, item["id"])
             item["display_currency"] = "CNY"
+            item["capability_summary"] = _run_capability_summary(
+                conn, item["id"]
+            )
         return result
 
 
@@ -2096,6 +2555,14 @@ def get_run_detail(run_id: str) -> dict[str, Any]:
         run_result = dict(run)
         run_result["estimated_cost_cny"] = _run_cost_cny(conn, run_id)
         run_result["display_currency"] = "CNY"
+        release_config_row = conn.execute(
+            "SELECT config_json FROM releases WHERE id=?", (run_result["release_id"],)
+        ).fetchone()
+        release_config = (
+            json.loads(release_config_row["config_json"])
+            if release_config_row
+            else None
+        )
         input_message = conn.execute(
             """
             SELECT id, role, content, created_at
@@ -2121,6 +2588,9 @@ def get_run_detail(run_id: str) -> dict[str, Any]:
             "trace_events": events,
             "cloud_call_snaps": snaps,
             "mcp_call_snaps": mcp_snaps,
+            "capability_summary": _run_capability_summary(
+                conn, run_id, release_config=release_config
+            ),
         }
 
 
@@ -2150,6 +2620,14 @@ def get_messages(conversation_id: str) -> list[dict[str, Any]]:
                     None,
                 )
                 message["agent_name"] = match["name"] if match else agent_id
+            if message.get("role") == "assistant" and message.get("run_id"):
+                message["capability_summary"] = _run_capability_summary(
+                    conn,
+                    str(message["run_id"]),
+                    release_config=json.loads(config_json) if config_json else None,
+                )
+            else:
+                message["capability_summary"] = None
         result.extend(
             {
                 **dict(row),
@@ -2161,6 +2639,7 @@ def get_messages(conversation_id: str) -> list[dict[str, Any]]:
                 "run_started_at": None,
                 "run_finished_at": None,
                 "agent_name": None,
+                "capability_summary": None,
             }
             for row in conn.execute(
                 """
